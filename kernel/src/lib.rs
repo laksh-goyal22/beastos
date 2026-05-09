@@ -23,7 +23,7 @@
 // #![feature(const_mut_refs)]
 // #![feature(naked_functions)]
 
-extern crate alloc;
+// extern crate alloc;
 
 // pub mod acpi;
 pub mod arch;

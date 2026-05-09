@@ -49,20 +49,23 @@ iso: build
 	@cp $(KERNEL_BINARY) $(ISO_DIR)/boot/beast.kernel
 	@cp boot/limine/limine.cfg $(ISO_DIR)/boot/
 	@cp boot/limine/limine.sys $(ISO_DIR)/boot/
+	@cp boot/limine/limine.sys $(ISO_DIR)/boot/limine-bios.sys
 	@cp boot/limine/limine-bios-cd.bin $(ISO_DIR)/boot/
 	@cp boot/limine/limine-uefi-cd.bin $(ISO_DIR)/boot/
 	xorriso -as mkisofs -b boot/limine-bios-cd.bin \
 		-no-emul-boot -boot-load-size 4 -boot-info-table \
-		--embedded-boot boot/limine/limine-bios-cd.bin \
+		--efi-boot boot/limine-uefi-cd.bin \
+		-efi-boot-part --efi-boot-image \
+		--protective-msdos-label \
 		-o $(ISO_FILE) $(ISO_DIR)
 	./boot/limine/limine bios-install $(ISO_FILE)
 	@echo "✅ ISO created: $(ISO_FILE)"
 
 # Run in QEMU
-run: build
+run: iso
 	@echo "🚀 Launching Beast OS in QEMU..."
 	$(QEMU) -m $(QEMU_MEMORY) $(QEMU_FLAGS) \
-		-drive format=raw,file=$(ISO_FILE) \
+		-cdrom $(ISO_FILE) \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04
 
 # Debug with GDB
