@@ -1,0 +1,42 @@
+[workspace]
+resolver = "2"
+members = [
+    "kernel",
+    "drivers/ahci",
+    "drivers/usb",
+    "drivers/audio",
+    "drivers/network",
+    "drivers/gpu",
+    "compositor",
+    "userland/libc",
+    "userland/bde",
+    "userland/shell",
+    "libs/beast_ring",
+    "libs/beast_capability",
+    "libs/beast_alloc",
+    "libs/beast_font",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Laksh Goyal"]
+license = "GPL-3.0"
+repository = "https://github.com/yourusername/beast-os"
+
+[workspace.dependencies]
+spin = "0.9"
+bitflags = "2.4"
+log = "0.4"
+volatile = "0.5"
+x86_64 = "0.15"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
+opt-level = "z"
+codegen-units = 1
+strip = true

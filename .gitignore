@@ -1,0 +1,28 @@
+# Build artifacts
+/target/
+**/*.o
+**/*.bin
+**/*.iso
+**/*.img
+
+# Cargo
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Generated ISO contents
+/iso/boot/beast.kernel
+/iso/initrd/init
+
+# Debug
+*.log
+core.*

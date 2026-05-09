@@ -1,0 +1,14 @@
+[build]
+target = "x86_64-beast_os.json"
+
+[target.x86_64-beast_os]
+runner = "scripts/run_qemu.sh"
+rustflags = [
+    "-C", "link-arg=-Tboot/linker/kernel.ld",
+    "-C", "code-model=kernel",
+    "-C", "relocation-model=static",
+]
+
+[unstable]
+build-std = ["core", "compiler_builtins", "alloc"]
+build-std-features = ["compiler-builtins-mem"]

@@ -1,0 +1,16 @@
+[package]
+name = "beast_os_kernel"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+spin = { workspace = true }
+bitflags = { workspace = true }
+log = { workspace = true }
+volatile = { workspace = true }
+x86_64 = { workspace = true }
+beast_ring = { path = "../libs/beast_ring" }
+beast_alloc = { path = "../libs/beast_alloc" }
+beast_capability = { path = "../libs/beast_capability" }
