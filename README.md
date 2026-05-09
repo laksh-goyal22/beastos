@@ -82,19 +82,72 @@ make test
 
 ## Project Structure
 
-```
+```text
 beast-os/
-├── boot/          # Bootloader (Limine + assembly stages)
-├── kernel/        # Microkernel (Ring 0)
-├── drivers/       # Ring 3 userspace drivers
-├── compositor/    # Glass Engine graphics compositor
-├── userland/      # User applications & libraries
-├── libs/          # Shared libraries (SPSC, allocator, fonts)
-├── tools/         # Build utilities
-├── scripts/       # Build & run scripts
-├── docs/          # Documentation
-└── tests/         # Integration tests
+├── boot/                   # Bootloader configuration
+│   └── linker/
+│       └── kernel.ld       # Kernel linker script (Limine protocol compliant)
+├── kernel/                 # Microkernel (Ring 0) — active development
+│   ├── build.rs            # Build script: linker args & asm file watch
+│   ├── Cargo.toml          # Kernel crate dependencies (limine, spin, uart_16550)
+│   └── src/
+│       ├── main.rs         # Kernel entry point (kmain, Limine request statics)
+│       ├── lib.rs          # Kernel crate root — re-exports all modules
+│       ├── logger.rs       # Serial-port debug logger (kprint!/kprintln!)
+│       ├── sync.rs         # Spinlock<T> synchronization primitive
+│       ├── arch/           # x86_64 CPU-specific code
+│       │   ├── mod.rs      # arch module root
+│       │   ├── gdt.rs      # Global Descriptor Table + TSS (Spinlock-protected)
+│       │   ├── idt.rs      # Interrupt Descriptor Table + exception handlers
+│       │   ├── paging.rs   # 4-level page table management
+│       │   ├── smp.rs      # SMP / LAPIC initialization (stub)
+│       │   ├── syscall_entry.rs  # SYSCALL/SYSRET entry point
+│       │   └── asm/
+│       │       └── mod.rs  # MSR read/write helpers (rdmsr, wrmsr)
+│       ├── drivers/        # Ring 0 hardware drivers
+│       │   ├── mod.rs      # drivers module root (init() dispatcher)
+│       │   ├── console.rs  # Text console and basic VGA/framebuffer text rendering
+│       │   ├── framebuffer.rs   # Limine framebuffer init + pixel draw
+│       │   ├── keyboard.rs # PS/2 keyboard initialization and interrupt handling
+│       │   ├── pic.rs      # 8259 PIC remapping
+│       │   └── pit.rs      # PIT timer configuration
+│       └── memory/         # Memory management
+│           ├── mod.rs      # memory module root
+│           ├── heap.rs     # Kernel heap allocator (linked-list/slab-based)
+│           ├── pmm.rs      # Physical Memory Manager (bitmap allocator)
+│           └── vmm.rs      # Virtual Memory Manager + HHDM offset
+├── drivers/                # Ring 3 userspace drivers (planned)
+├── compositor/             # Glass Engine compositor (planned)
+├── userland/               # User applications & libraries (planned)
+├── libs/                   # Shared Rust libraries (planned)
+├── tools/                  # Build utilities (planned)
+├── scripts/                # Build & run automation (planned)
+├── docs/                   # Architecture documentation (planned)
+├── tests/                  # Integration tests (planned)
+├── AGENTS.md               # AI agent handover / session continuity log
+└── Makefile                # Build orchestration
 ```
+
+## Core Modules
+
+### 1. Kernel (Ring 0)
+The heart of Beast OS. It handles only the most essential tasks:
+- **SMP Management**: Multi-core initialization and per-CPU data structures.
+- **Memory Management**: A custom Buddy Allocator for physical pages and a 4-level paging system.
+- **Scheduler**: A high-performance, O(1) scheduler designed for low latency.
+- **IPC**: The primary communication mechanism using lock-free SPSC rings.
+
+### 2. Glass Engine (Compositor)
+A premium graphics compositor that implements:
+- **SSE4.1 Acceleration**: Fast alpha blending and image processing.
+- **Damage Tracking**: Only redraws modified screen regions to save CPU cycles.
+- **Glassmorphism**: Native support for frosted glass effects and smooth gradients.
+
+### 3. Drivers (Ring 3)
+Following the microkernel philosophy, most drivers run in userspace:
+- **Isolation**: Crashed drivers are restarted by the kernel without affecting system stability.
+- **Performance**: High-speed communication with the kernel via shared memory and rings.
+
 
 ## Target Hardware
 
