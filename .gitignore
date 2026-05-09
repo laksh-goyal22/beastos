@@ -26,3 +26,4 @@ Thumbs.db
 # Debug
 *.log
 core.*
+.git_token
