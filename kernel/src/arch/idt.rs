@@ -112,8 +112,8 @@ pub extern "x86-interrupt" fn page_fault_handler(
     _error_code: u64,
 ) {
     // Read CR2 for faulting address
-    let cr2: u64;
-    unsafe { asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack)) };
+    let _cr2: u64;
+    unsafe { asm!("mov {}, cr2", out(reg) _cr2, options(nomem, nostack)) };
 
     // TODO: Handle demand paging, CoW, or kill process
     // For now, halt

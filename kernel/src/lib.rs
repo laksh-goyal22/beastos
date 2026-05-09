@@ -21,19 +21,20 @@
 #![no_main]
 #![feature(abi_x86_interrupt)]
 #![feature(alloc_error_handler)]
-#![feature(const_mut_refs)]
-#![feature(naked_functions)]
+// #![feature(const_mut_refs)]
+// #![feature(naked_functions)]
 
 extern crate alloc;
 
-pub mod acpi;
+// pub mod acpi;
 pub mod arch;
-pub mod drivers;
-pub mod fs;
-pub mod ipc;
+// pub mod drivers;
+// pub mod fs;
+// pub mod ipc;
 pub mod logger;
 pub mod memory;
-pub mod scheduler;
-pub mod sync;
-pub mod syscall;
-pub mod time;
+// pub mod scheduler;
+// pub mod sync;
+// pub mod syscall;
+// pub mod time;
+

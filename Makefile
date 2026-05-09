@@ -7,6 +7,7 @@ ISO_FILE := beast-os.iso
 QEMU := qemu-system-x86_64
 QEMU_MEMORY := 512M
 QEMU_FLAGS := -serial stdio -no-reboot -no-shutdown
+CARGO_CMD := cargo build -Z build-std=core,compiler_builtins,alloc -Z json-target-spec
 
 .PHONY: all build kernel drivers userland run debug test bench clean iso
 
@@ -20,25 +21,25 @@ build: kernel drivers userland
 # Build kernel
 kernel:
 	@echo "🔨 Building kernel..."
-	cargo build --release -p beast_os_kernel
+	$(CARGO_CMD) --release -p beast_os_kernel
 	@echo "✅ Kernel built"
 
 # Build userspace drivers
 drivers:
 	@echo "🔨 Building drivers..."
-	cargo build --release -p ahci_driver
-	cargo build --release -p usb_driver
-	cargo build --release -p network_driver
-	cargo build --release -p gpu_driver
-	cargo build --release -p audio_driver
+	$(CARGO_CMD) --release -p ahci_driver
+	$(CARGO_CMD) --release -p usb_driver
+	$(CARGO_CMD) --release -p network_driver
+	$(CARGO_CMD) --release -p gpu_driver
+	$(CARGO_CMD) --release -p audio_driver
 	@echo "✅ Drivers built"
 
 # Build userland
 userland:
 	@echo "🔨 Building userland..."
-	cargo build --release -p beast_libc
-	cargo build --release -p beast_shell
-	cargo build --release -p beast_desktop
+	$(CARGO_CMD) --release -p beast_libc
+	$(CARGO_CMD) --release -p beast_shell
+	$(CARGO_CMD) --release -p beast_desktop
 	@echo "✅ Userland built"
 
 # Create bootable ISO

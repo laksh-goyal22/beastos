@@ -3,6 +3,7 @@
 //! Fast syscall via SYSCALL/SYSRET with swapgs.
 
 use core::arch::asm;
+use core::arch::naked_asm;
 
 const MSR_STAR: u32 = 0xC0000081;
 const MSR_LSTAR: u32 = 0xC0000082;
@@ -19,9 +20,9 @@ pub fn init() {
     }
 }
 
-#[naked]
+#[unsafe(naked)]
 unsafe extern "C" fn syscall_entry() {
-    asm!(
+    naked_asm!(
         "swapgs",
         "mov gs:[0x10], rsp",
         "mov rsp, gs:[0x08]",
@@ -35,12 +36,11 @@ unsafe extern "C" fn syscall_entry() {
         "swapgs",
         "sysretq",
         dispatch = sym syscall_dispatch,
-        options(noreturn)
     );
 }
 
 #[no_mangle]
-extern "C" fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, _a4: u64, _a5: u64) -> i64 {
+extern "C" fn syscall_dispatch(num: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64) -> i64 {
     match num {
         0 => -1,  // sys_read
         1 => -1,  // sys_write
