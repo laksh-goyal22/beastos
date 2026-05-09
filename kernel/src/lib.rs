@@ -27,13 +27,13 @@
 
 // pub mod acpi;
 pub mod arch;
-// pub mod drivers;
+pub mod drivers;
 // pub mod fs;
-// pub mod ipc;
+pub mod ipc;
 pub mod logger;
 pub mod memory;
-// pub mod scheduler;
-// pub mod sync;
-// pub mod syscall;
+pub mod scheduler;
+pub mod sync;
+pub mod syscall;
 // pub mod time;
 

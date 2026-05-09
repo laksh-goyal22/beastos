@@ -1,0 +1,4 @@
+Agent: Antigravity
+Task: Fix SPSC scheduler lost-wakeup and queue corruption
+Timestamp: 2026-05-09T17:22:00Z
+Files: kernel/src/scheduler/mod.rs, kernel/src/scheduler/mlfq.rs

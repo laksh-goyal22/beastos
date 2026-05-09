@@ -11,6 +11,8 @@ bitflags = { workspace = true }
 log = { workspace = true }
 volatile = { workspace = true }
 x86_64 = { workspace = true }
+limine = { workspace = true }
 beast_ring = { path = "../libs/beast_ring" }
 beast_alloc = { path = "../libs/beast_alloc" }
 beast_capability = { path = "../libs/beast_capability" }
+beast_font = { path = "../libs/beast_font" }

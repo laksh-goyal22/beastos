@@ -4,9 +4,9 @@
 /// passes linker configuration to the compiler.
 
 fn main() {
-    // Tell cargo to use our custom linker script
-    println!("cargo:rustc-link-arg=-Tboot/linker/kernel.ld");
-    println!("cargo:rerun-if-changed=boot/linker/kernel.ld");
+    // Linker script is passed via .cargo/config.toml — do NOT duplicate it here.
+    // Passing -T twice causes lld to process PHDRS twice → layout errors.
+    println!("cargo:rerun-if-changed=../boot/linker/kernel.ld");
 
     // Assemble inline asm helpers
     let asm_files = [

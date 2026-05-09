@@ -12,4 +12,5 @@ pub mod idt;
 pub mod paging;
 pub mod syscall_entry;
 pub mod smp;
+pub mod userspace;
 pub mod asm;

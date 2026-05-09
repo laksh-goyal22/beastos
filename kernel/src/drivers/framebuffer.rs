@@ -1,0 +1,146 @@
+//! Framebuffer Driver
+//!
+//! Limine provides a linear framebuffer. This module wraps it for
+//! pixel drawing, text rendering, and the future Glass Engine compositor.
+
+use crate::kprintln;
+use core::slice;
+use spin::Mutex;
+use limine::framebuffer::Framebuffer as LimineFb;
+
+/// Framebuffer descriptor (populated from bootloader info).
+pub struct Framebuffer {
+    pub base: *mut u32,
+    pub width: u32,
+    pub height: u32,
+    pub pitch: u32, // bytes per row
+}
+
+unsafe impl Send for Framebuffer {}
+unsafe impl Sync for Framebuffer {}
+
+/// Global framebuffer (set during init from bootloader).
+static FRAMEBUFFER: Mutex<Option<Framebuffer>> = Mutex::new(None);
+
+/// Initialize framebuffer from Limine response.
+pub fn init(fb: &LimineFb) {
+    let mut global_fb = FRAMEBUFFER.lock();
+    
+    let addr = fb.address() as u64;
+    // If the address is in the lower half, it's a physical address that needs HHDM adjustment.
+    // Higher half addresses on x86_64 start at 0x8000_0000_0000_0000 and above.
+    let base_addr = if addr < 0x8000_0000_0000_0000 {
+        crate::memory::vmm::phys_to_virt(addr)
+    } else {
+        addr
+    };
+
+    *global_fb = Some(Framebuffer {
+        base: base_addr as *mut u32,
+        width: fb.width as u32,
+        height: fb.height as u32,
+        pitch: fb.pitch as u32,
+    });
+    kprintln!("    Framebuffer: {}x{}, pitch={}, base={:#x}", fb.width, fb.height, fb.pitch, base_addr);
+}
+
+/// Get framebuffer width.
+pub fn width() -> u32 {
+    FRAMEBUFFER.lock().as_ref().map(|fb| fb.width).unwrap_or(0)
+}
+
+/// Get framebuffer height.
+pub fn height() -> u32 {
+    FRAMEBUFFER.lock().as_ref().map(|fb| fb.height).unwrap_or(0)
+}
+
+/// Helper to get a mutable slice of a row for fast SIMD operations.
+unsafe fn get_row_slice<'a>(fb: &'a Framebuffer, y: u32, x_start: u32, width: u32) -> Option<&'a mut [u32]> {
+    if y >= fb.height || x_start >= fb.width {
+        return None;
+    }
+    let actual_width = core::cmp::min(width, fb.width - x_start);
+    if actual_width == 0 {
+        return None;
+    }
+    
+    let offset = (y * (fb.pitch / 4) + x_start) as isize;
+    Some(slice::from_raw_parts_mut(fb.base.offset(offset), actual_width as usize))
+}
+
+/// Put a pixel at (x, y) with the given 32-bit ARGB color.
+pub fn put_pixel(x: u32, y: u32, color: u32) {
+    if let Some(ref fb) = *FRAMEBUFFER.lock() {
+        if x < fb.width && y < fb.height {
+            let offset = (y * (fb.pitch / 4) + x) as isize;
+            unsafe {
+                fb.base.offset(offset).write_volatile(color);
+            }
+        }
+    }
+}
+
+/// Fill the entire screen with a color.
+pub fn clear(color: u32) {
+    if let Some(ref fb) = *FRAMEBUFFER.lock() {
+        unsafe {
+            // Optimized clear using slice::fill
+            let len = (fb.height * (fb.pitch / 4)) as usize;
+            slice::from_raw_parts_mut(fb.base, len).fill(color);
+        }
+    }
+}
+
+/// Fill a rectangle (SSE/SIMD accelerated via slice::fill).
+pub fn fill_rect(x: u32, y: u32, w: u32, h: u32, color: u32) {
+    if let Some(ref fb) = *FRAMEBUFFER.lock() {
+        unsafe {
+            for dy in 0..h {
+                if let Some(row) = get_row_slice(fb, y + dy, x, w) {
+                    row.fill(color);
+                }
+            }
+        }
+    }
+}
+
+/// Blit an image/buffer to the screen (SSE/SIMD accelerated via slice::copy_from_slice).
+pub fn blit_rect(x: u32, y: u32, w: u32, h: u32, src: &[u32]) {
+    if let Some(ref fb) = *FRAMEBUFFER.lock() {
+        unsafe {
+            for dy in 0..h {
+                if let Some(row) = get_row_slice(fb, y + dy, x, w) {
+                    let src_start = (dy * w) as usize;
+                    let src_end = src_start + row.len();
+                    if src_end <= src.len() {
+                        row.copy_from_slice(&src[src_start..src_end]);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Draw a character using the beast_font 8x8 font.
+pub fn draw_char(x: u32, y: u32, c: char, fg: u32, bg: u32) {
+    if let Some(bitmap) = beast_font::get_char_bitmap(c) {
+        if let Some(ref fb) = *FRAMEBUFFER.lock() {
+            unsafe {
+                for (dy, row_val) in bitmap.iter().enumerate() {
+                    let screen_y = y + dy as u32;
+                    if let Some(row_slice) = get_row_slice(fb, screen_y, x, 8) {
+                        for dx in 0..8 {
+                            if dx < row_slice.len() {
+                                let pixel_color = if (row_val & (0x80 >> dx)) != 0 { fg } else { bg };
+                                row_slice[dx] = pixel_color;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        // Fallback for missing character: draw a solid block
+        fill_rect(x, y, 8, 8, fg);
+    }
+}

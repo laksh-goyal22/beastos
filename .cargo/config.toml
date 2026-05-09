@@ -1,10 +1,12 @@
 [build]
-target = "x86_64-beast_os.json"
+target = "x86_64-unknown-none"
 
-[target.x86_64-beast_os]
+[target.x86_64-unknown-none]
 runner = "scripts/run_qemu.sh"
 rustflags = [
     "-C", "link-arg=-Tboot/linker/kernel.ld",
+    "-C", "link-arg=-zmax-page-size=0x1000",
+    "-C", "link-arg=--strip-all",
     "-C", "code-model=kernel",
     "-C", "relocation-model=static",
 ]

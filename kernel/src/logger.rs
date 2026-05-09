@@ -54,10 +54,18 @@ pub fn init() {
     SERIAL_WRITER.lock().init();
 }
 
-/// Internal print function.
+/// Internal print function — outputs to serial AND framebuffer console.
 #[doc(hidden)]
 pub fn _kprint(args: fmt::Arguments) {
     SERIAL_WRITER.lock().write_fmt(args).unwrap();
+    // Also write to framebuffer console if available.
+    // Use try_lock() to avoid deadlocks when called from framebuffer::init()
+    // (which holds the FRAMEBUFFER lock while calling kprintln!).
+    if let Some(mut console) = crate::drivers::console::CONSOLE.try_lock() {
+        if console.width > 0 {
+            console.write_fmt(args).ok();
+        }
+    }
 }
 
 /// Print to serial console.

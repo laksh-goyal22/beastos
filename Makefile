@@ -1,13 +1,13 @@
 # Beast OS - Top-Level Build Orchestration
 # ==========================================
 
-KERNEL_BINARY := target/x86_64-beast_os/release/beast_os_kernel
+KERNEL_BINARY := target/x86_64-unknown-none/release/beast_os_kernel
 ISO_DIR := iso
 ISO_FILE := beast-os.iso
 QEMU := qemu-system-x86_64
 QEMU_MEMORY := 512M
-QEMU_FLAGS := -serial stdio -no-reboot -no-shutdown
-CARGO_CMD := cargo build -Z build-std=core,compiler_builtins,alloc -Z json-target-spec
+QEMU_FLAGS := -serial file:serial.log -no-reboot -no-shutdown
+CARGO_CMD := cargo build
 
 .PHONY: all build kernel drivers userland run debug test bench clean iso
 
@@ -46,10 +46,10 @@ userland:
 iso: build
 	@echo "📀 Creating bootable ISO..."
 	@mkdir -p $(ISO_DIR)/boot
+	@rm -f $(ISO_DIR)/boot/limine.cfg
 	@cp $(KERNEL_BINARY) $(ISO_DIR)/boot/beast.kernel
-	@cp boot/limine/limine.cfg $(ISO_DIR)/boot/
-	@cp boot/limine/limine.sys $(ISO_DIR)/boot/
-	@cp boot/limine/limine.sys $(ISO_DIR)/boot/limine-bios.sys
+	@cp boot/limine/limine.conf $(ISO_DIR)/boot/
+	@cp boot/limine/limine-bios.sys $(ISO_DIR)/boot/
 	@cp boot/limine/limine-bios-cd.bin $(ISO_DIR)/boot/
 	@cp boot/limine/limine-uefi-cd.bin $(ISO_DIR)/boot/
 	xorriso -as mkisofs -b boot/limine-bios-cd.bin \
