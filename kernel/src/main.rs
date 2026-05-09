@@ -5,6 +5,7 @@
 
 #![no_std]
 #![no_main]
+#![feature(alloc_error_handler)]
 
 use core::panic::PanicInfo;
 

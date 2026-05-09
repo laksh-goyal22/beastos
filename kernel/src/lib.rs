@@ -20,7 +20,6 @@
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
-#![feature(alloc_error_handler)]
 // #![feature(const_mut_refs)]
 // #![feature(naked_functions)]
 

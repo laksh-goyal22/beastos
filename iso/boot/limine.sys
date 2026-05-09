@@ -1,0 +1,7 @@
+; Limine bootloader system file placeholder
+; The actual limine.sys binary must be obtained from:
+;   https://github.com/limine-bootloader/limine/releases
+;
+; Download and place the binary here:
+;   git clone https://github.com/limine-bootloader/limine.git --branch=v8.x-binary --depth=1
+;   cp limine/limine.sys boot/limine/limine.sys

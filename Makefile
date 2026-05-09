@@ -1,7 +1,7 @@
 # Beast OS - Top-Level Build Orchestration
 # ==========================================
 
-KERNEL_BINARY := target/x86_64-beast_os/release/beast_os
+KERNEL_BINARY := target/x86_64-beast_os/release/beast_os_kernel
 ISO_DIR := iso
 ISO_FILE := beast-os.iso
 QEMU := qemu-system-x86_64
@@ -27,19 +27,19 @@ kernel:
 # Build userspace drivers
 drivers:
 	@echo "🔨 Building drivers..."
-	$(CARGO_CMD) --release -p ahci_driver
-	$(CARGO_CMD) --release -p usb_driver
-	$(CARGO_CMD) --release -p network_driver
-	$(CARGO_CMD) --release -p gpu_driver
-	$(CARGO_CMD) --release -p audio_driver
+	$(CARGO_CMD) --release -p ahci
+	$(CARGO_CMD) --release -p usb
+	$(CARGO_CMD) --release -p network
+	$(CARGO_CMD) --release -p gpu
+	$(CARGO_CMD) --release -p audio
 	@echo "✅ Drivers built"
 
 # Build userland
 userland:
 	@echo "🔨 Building userland..."
-	$(CARGO_CMD) --release -p beast_libc
-	$(CARGO_CMD) --release -p beast_shell
-	$(CARGO_CMD) --release -p beast_desktop
+	$(CARGO_CMD) --release -p libc
+	$(CARGO_CMD) --release -p shell
+	$(CARGO_CMD) --release -p bde
 	@echo "✅ Userland built"
 
 # Create bootable ISO
@@ -49,9 +49,13 @@ iso: build
 	@cp $(KERNEL_BINARY) $(ISO_DIR)/boot/beast.kernel
 	@cp boot/limine/limine.cfg $(ISO_DIR)/boot/
 	@cp boot/limine/limine.sys $(ISO_DIR)/boot/
-	xorriso -as mkisofs -b boot/limine.sys \
+	@cp boot/limine/limine-bios-cd.bin $(ISO_DIR)/boot/
+	@cp boot/limine/limine-uefi-cd.bin $(ISO_DIR)/boot/
+	xorriso -as mkisofs -b boot/limine-bios-cd.bin \
 		-no-emul-boot -boot-load-size 4 -boot-info-table \
+		--embedded-boot boot/limine/limine-bios-cd.bin \
 		-o $(ISO_FILE) $(ISO_DIR)
+	./boot/limine/limine bios-install $(ISO_FILE)
 	@echo "✅ ISO created: $(ISO_FILE)"
 
 # Run in QEMU
