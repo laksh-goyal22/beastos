@@ -66,7 +66,7 @@ pub extern "C" fn kmain() -> ! {
         0x2000000,
     );
 
-    // Load LDT (needs PMM/VMM initialized first) - currently disabled
+    // LDT disabled (LLDT needs further debugging)
     // beast_os_kernel::arch::gdt::enable_ldt();
 
     beast_os_kernel::scheduler::init();

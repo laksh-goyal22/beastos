@@ -11,6 +11,8 @@ pub const IORING_OP_WRITE: u8 = 2;
 pub const IORING_OP_READ_ZC: u8 = 3;
 pub const IORING_OP_OPEN: u8 = 4;
 pub const IORING_OP_CLOSE: u8 = 5;
+pub const IORING_OP_READV: u8 = 6;
+pub const IORING_OP_WRITEV: u8 = 7;
 
 pub const IORING_REGISTER_BUFFER: u64 = 0;
 pub const IORING_UNREGISTER_BUFFER: u64 = 1;
@@ -121,6 +123,8 @@ impl IoUring {
             IORING_OP_READ_ZC => { self.counters.zero_copy += 1; unsafe { self.read_zc(sqe) } }
             IORING_OP_OPEN => crate::syscall::sys_open(sqe.addr, sqe.len),
             IORING_OP_CLOSE => crate::syscall::sys_close(fd),
+            IORING_OP_READV => self.readv(fd, sqe.addr, sqe.len),
+            IORING_OP_WRITEV => self.writev(fd, sqe.addr, sqe.len),
             _ => -1,
         };
         self.counters.completed += 1;
@@ -223,5 +227,59 @@ impl IoUring {
                 return false;
             }
         }
+    }
+
+    /// Vectored read: read into multiple buffers from user's iovec array.
+    fn readv(&mut self, fd: u64, iovec_addr: u64, iovcnt: u64) -> i64 {
+        let (user_cr3, kernel_cr3) = unsafe { self.get_cr3() };
+        let max_iov = iovcnt.min(16) as usize;
+        let iovec_size = 16u64; // struct iovec = { base: u64, len: u64 }
+        let mut total = 0i64;
+        for i in 0..max_iov {
+            let entry_addr = iovec_addr + i as u64 * iovec_size;
+            let (base, len): (u64, u64) = unsafe {
+                if user_cr3 != kernel_cr3 { crate::arch::paging::write_cr3(user_cr3); }
+                let base = core::ptr::read_volatile(entry_addr as *const u64);
+                let len = core::ptr::read_volatile((entry_addr + 8) as *const u64);
+                if user_cr3 != kernel_cr3 { crate::arch::paging::write_cr3(kernel_cr3); }
+                (base, len)
+            };
+            let ret = crate::syscall::sys_read(fd, base, len);
+            if ret < 0 { return if total > 0 { total } else { ret }; }
+            total += ret;
+            if ret < len as i64 { break; }
+        }
+        total
+    }
+
+    /// Vectored write: write from multiple buffers using user's iovec array.
+    fn writev(&mut self, fd: u64, iovec_addr: u64, iovcnt: u64) -> i64 {
+        let (user_cr3, kernel_cr3) = unsafe { self.get_cr3() };
+        let max_iov = iovcnt.min(16) as usize;
+        let iovec_size = 16u64;
+        let mut total = 0i64;
+        for i in 0..max_iov {
+            let entry_addr = iovec_addr + i as u64 * iovec_size;
+            let (base, len): (u64, u64) = unsafe {
+                if user_cr3 != kernel_cr3 { crate::arch::paging::write_cr3(user_cr3); }
+                let base = core::ptr::read_volatile(entry_addr as *const u64);
+                let len = core::ptr::read_volatile((entry_addr + 8) as *const u64);
+                if user_cr3 != kernel_cr3 { crate::arch::paging::write_cr3(kernel_cr3); }
+                (base, len)
+            };
+            let ret = crate::syscall::sys_write(fd, base, len);
+            if ret < 0 { return if total > 0 { total } else { ret }; }
+            total += ret;
+        }
+        total
+    }
+
+    unsafe fn get_cr3(&self) -> (u64, u64) {
+        let sched = crate::scheduler::SCHEDULER.lock();
+        let slot = sched.current;
+        let ucr3 = sched.tasks[slot].as_ref().map(|t| t.page_table).unwrap_or(0);
+        let kcr3 = crate::arch::syscall_entry::KERNEL_CR3;
+        drop(sched);
+        (ucr3, kcr3)
     }
 }

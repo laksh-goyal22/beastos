@@ -257,7 +257,7 @@ pub fn init() {
 
 /// Load the LDT (called after memory and IDT are initialized).
 pub fn enable_ldt() {
-    crate::kprintln!("  [GDT] LDT disabled (pending refactor)");
+    crate::kprintln!("  [GDT] LDT disabled (needs debug)");
 }
 
 
