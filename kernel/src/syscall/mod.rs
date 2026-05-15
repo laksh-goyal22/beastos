@@ -152,6 +152,7 @@ pub extern "C" fn syscall_dispatch(
         203 => match sys_port_in(a1 as u16) { Ok(v) => v as i64, Err(e) => e as i64 },
         204 => match sys_port_out(a1 as u16, a2 as u32, a3 as u8) { Ok(_) => 0, Err(e) => e as i64 },
          210 => sys_fb_info(a1),
+         220 => sys_map_phys(a1, a2, a3),
          300 => sys_io_uring_setup(a1, a2),
          301 => sys_io_uring_enter(a1, a2, a3),
          302 => sys_io_uring_register(a1, a2, a3),
@@ -793,6 +794,20 @@ fn sys_fb_info(buf_ptr: u64) -> i64 {
         *hh = h;
         let pp = (buf_ptr + 16) as *mut u32;
         *pp = p;
+    }
+    0
+}
+
+fn sys_map_phys(phys_addr: u64, size: u64, dest_addr: u64) -> i64 {
+    if size == 0 { return -22; }
+    let cr3 = crate::arch::paging::read_cr3() & !0xFFF;
+    let mut vmm = crate::memory::vmm::VirtualMemoryManager::new(cr3);
+    use crate::arch::paging::flags;
+    for offset in (0..size).step_by(4096) {
+        if let Err(_) = vmm.map_page_with_flags(
+            dest_addr + offset, phys_addr + offset,
+            flags::PRESENT | flags::USER | flags::WRITABLE
+        ) { return -12; }
     }
     0
 }

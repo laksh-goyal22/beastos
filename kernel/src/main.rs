@@ -207,6 +207,43 @@ pub extern "C" fn kmain() -> ! {
         }
     }
     
+    // Spawn compositor
+    kprintln!("[BOOT] Spawning compositor...");
+    if let Some(user_cr3) = beast_os_kernel::memory::vmm::create_user_page_table() {
+        let mut vmm = beast_os_kernel::memory::vmm::VirtualMemoryManager::new(user_cr3);
+        if let Ok(mut file) = beast_os_kernel::fs::vfs::VFS.lock().open("/bin/compositor.beast") {
+            let size = file.size() as usize;
+            let mut buffer = alloc::vec::Vec::with_capacity(size);
+            buffer.resize(size, 0u8);
+            if file.read(&mut buffer).is_ok() {
+                if let Ok(image) = beast_os_kernel::fs::universal_exec::load(&buffer, &mut vmm) {
+                    let stack_top = 0x0000_7FFF_FFFF_F000u64;
+                    for i in 0..16 {
+                        let sp = stack_top - (i + 1) * 4096;
+                        if let Some(phys) = beast_os_kernel::memory::pmm::alloc_page() {
+                            let _ = vmm.map_page_with_flags(sp, phys,
+                                beast_os_kernel::arch::paging::flags::PRESENT |
+                                beast_os_kernel::arch::paging::flags::WRITABLE |
+                                beast_os_kernel::arch::paging::flags::USER);
+                            unsafe { core::ptr::write_bytes(
+                                beast_os_kernel::memory::vmm::phys_to_virt(phys) as *mut u8, 0, 4096); }
+                        }
+                    }
+                    if let Some(tp) = beast_os_kernel::memory::pmm::alloc_page() {
+                        let tv = beast_os_kernel::memory::vmm::phys_to_virt(tp);
+                        let src = beast_os_kernel::scheduler::switch::user_entry_trampoline as *const u8;
+                        unsafe { core::ptr::copy_nonoverlapping(src, tv as *mut u8, 64); }
+                        let _ = vmm.map_page_with_flags(0x500000, tp,
+                            beast_os_kernel::arch::paging::flags::PRESENT |
+                            beast_os_kernel::arch::paging::flags::USER);
+                        beast_os_kernel::scheduler::spawn_user_with_page_table_and_trampoline(
+                            image.entry, stack_top, "compositor", 1, user_cr3, 0x500000);
+                    }
+                }
+            }
+        }
+    }
+    
     kprintln!("[SUCCESS] Beast OS initialized. Starting scheduler.");
     beast_os_kernel::scheduler::run();
     
