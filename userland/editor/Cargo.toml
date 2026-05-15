@@ -1,0 +1,12 @@
+[package]
+name = "be"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+beast_crt = { path = "../../libs/beast_crt" }
+beast_syscall = { path = "../../libs/beast_syscall" }
+beast_ring = { path = "../../libs/beast_ring" }
+beast_capability = { path = "../../libs/beast_capability" }
+beast_font = { path = "../../libs/beast_font" }
+beast_alloc = { path = "../../libs/beast_alloc" }

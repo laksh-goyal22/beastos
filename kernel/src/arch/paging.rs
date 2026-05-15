@@ -39,7 +39,9 @@ impl PageTableEntry {
     }
 
     pub fn set_address(&mut self, addr: u64, flags: u64) {
-        self.0 = (addr & 0x000F_FFFF_FFFF_F000) | flags;
+        // Physical address bits: 12 to 51. Flags: 0-11 and 63.
+        let mask = 0x000F_FFFF_FFFF_F000;
+        self.0 = (addr & mask) | (flags & !mask);
     }
 
     pub fn physical_address(&self) -> u64 {
@@ -48,6 +50,14 @@ impl PageTableEntry {
 
     pub fn flags(&self) -> u64 {
         self.0 & 0xFFF0_0000_0000_0FFF
+    }
+    
+    pub fn raw(&self) -> u64 {
+        self.0
+    }
+    
+    pub fn set_raw(&mut self, val: u64) {
+        self.0 = val;
     }
 }
 
@@ -88,6 +98,12 @@ pub fn read_cr3() -> u64 {
     let value: u64;
     unsafe { asm!("mov {}, cr3", out(reg) value, options(nomem, nostack)) };
     value
+}
+
+/// Write CR3 value (switch page table).
+#[inline]
+pub unsafe fn write_cr3(cr3: u64) {
+    asm!("mov cr3, {}", in(reg) cr3, options(nostack));
 }
 
 /// Enable PCID (Process-Context Identifiers) for TLB efficiency.

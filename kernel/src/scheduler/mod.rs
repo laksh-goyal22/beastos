@@ -1,332 +1,495 @@
-//! Beast OS Scheduler — MLFQ with SPSC-Aware Boosting
-//!
-//! Public API for the kernel scheduler subsystem.
-//!
-//! - `init()`       — create idle task, start scheduling
-//! - `spawn()`      — add a new task
-//! - `yield_now()`  — cooperative context switch
-//! - `tick()`       — called from PIT timer ISR
-//! - `exit_current()` — terminate running task
+//! Scheduler — Task Management & Context Switching
 
 pub mod task;
 pub mod mlfq;
 pub mod switch;
 
-use task::*;
-use mlfq::Scheduler;
-use crate::kprintln;
-use crate::sync::Spinlock;
 use core::sync::atomic::{AtomicBool, Ordering};
+use crate::sync::Spinlock;
+use crate::arch::idt::AllRegisters;
+use crate::kprintln;
+use task::{Task, TaskId, TaskState, BlockReason, NO_TASK};
+use mlfq::Scheduler;
 
-/// Global scheduler instance (spinlock-protected).
-static SCHEDULER: Spinlock<Scheduler> = Spinlock::new(Scheduler::new());
-
-/// Flag: scheduler is active and context switches are allowed.
+pub static SCHEDULER: Spinlock<Scheduler> = Spinlock::new(Scheduler::new());
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 
-/// Flag: timer ISR sets this when a reschedule is needed.
-/// Checked after returning from interrupt to avoid switching mid-ISR.
-static NEED_RESCHEDULE: AtomicBool = AtomicBool::new(false);
-
-// ── Public API ───────────────────────────────────────────────────────────
-
-/// Initialize the scheduler and create the idle task.
-///
-/// Called from `kmain()` after memory subsystem is ready.
-pub fn init() {
-    let mut sched = SCHEDULER.lock();
-
-    // Slot 0: idle task (lowest priority — always runnable)
-    let slot = sched.spawn(idle_task, "idle", PRIORITY_LEVELS - 1);
-    if let Some(s) = slot {
-        sched.current = s;
-        if let Some(ref mut t) = sched.tasks[s] {
-            t.state = TaskState::Running;
-        }
-    }
-
-    sched.started = true;
-    kprintln!("  [SCHED] MLFQ scheduler initialized ({} levels, boost every {}s)",
-        PRIORITY_LEVELS, 5);
-}
-
-/// Spawn a new task at the given MLFQ priority level.
-pub fn spawn(entry: extern "C" fn(), name: &str, priority: usize) -> Option<TaskId> {
-    SCHEDULER.lock().spawn(entry, name, priority)
-}
-
-/// Start the scheduler — switches into the first ready task.
-///
-/// This function never returns to the caller. The caller's context
-/// is saved as the "bootstrap" context and only resumed if all
-/// tasks die (which shouldn't happen — idle task is immortal).
+/// Start the scheduler
 pub fn run() -> ! {
     ACTIVE.store(true, Ordering::SeqCst);
     kprintln!("  [SCHED] Scheduler running");
 
-    // The bootstrap context — we switch away from this and never return.
-    let mut bootstrap_ctx = Context::empty();
-
-    let first_rsp: *const u64;
-    {
-        let sched = SCHEDULER.lock();
-        if sched.current == NO_TASK {
-            panic!("[SCHED] No tasks to run!");
-        }
-        let task = sched.tasks[sched.current].as_ref().unwrap();
-        first_rsp = &task.context.rsp as *const u64;
+    let mut sched = SCHEDULER.lock();
+    let slot = sched.pick_next();
+    if slot == NO_TASK {
+        panic!("No tasks to run!");
     }
+    
+    let task = sched.tasks[slot].as_ref().unwrap();
+    if task.id <= 1 {
+        kprintln!("[SCHED] Task {} '{}': r12={:x} rip={:x} rsp={:x} cs={:x} ss={:x}", 
+                  task.id, task.name_str(), task.context.r12, task.context.rip, 
+                  task.context.rsp, task.context.cs, task.context.ss);
+    }
+    
+    sched.current = slot;
+    
+    sched.current = slot;
+    let task = sched.tasks[slot].as_mut().expect("Picked slot is empty");
+    task.state = TaskState::Running;
+    
+    let page_table = task.page_table;
+    let kernel_stack_top = task.stack_virt + crate::scheduler::task::TASK_STACK_SIZE as u64;
+    crate::kprintln!("[SCHED_RUN] task={} '{}' kstack_top={:#x} ctx.rsp={:#x} ctx.rip={:#x} ctx.cs={:#x} r12={:#x} r13={:#x}",
+        task.id, task.name_str(), kernel_stack_top, task.context.rsp, task.context.rip, task.context.cs,
+        task.context.r12, task.context.r13);
+    crate::arch::gdt::set_kernel_stack(kernel_stack_top);
+    
+    let ctx_ptr = &task.context as *const _ as u64;
+    drop(sched);
 
     unsafe {
-        switch::context_switch(
-            &mut bootstrap_ctx.rsp as *mut u64,
-            first_rsp,
+        crate::arch::paging::load_cr3(page_table, 0);
+        
+        // Restore initial task context by building an IRETQ frame
+        core::arch::asm!(
+            "mov rsp, {kernel_stack_top}",
+            "mov rdx, {ctx}",
+
+            // Push IRETQ frame
+            "push qword ptr [rdx + 152]", // ss
+            "push qword ptr [rdx + 144]", // rsp
+            "push qword ptr [rdx + 136]", // rflags
+            "push qword ptr [rdx + 128]", // cs
+            "push qword ptr [rdx + 120]", // rip
+
+            // Restore GPRs
+            "mov rax, [rdx + 0]",
+            "mov rbx, [rdx + 8]",
+            "mov rcx, [rdx + 16]",
+            "mov rbp, [rdx + 32]",
+            "mov rsi, [rdx + 40]",
+            "mov rdi, [rdx + 48]",
+            "mov r8,  [rdx + 56]",
+            "mov r9,  [rdx + 64]",
+            "mov r10, [rdx + 72]",
+            "mov r11, [rdx + 80]",
+            "mov r12, [rdx + 88]",
+            "mov r13, [rdx + 96]",
+                "mov r14, [rdx + 104]",
+                "mov r15, [rdx + 112]",
+
+                // DEBUG: dump iretq frame: [rsp+16]=rflags [rsp+8]=cs [rsp+0]=rip
+                "mov r15, rdx",
+                // dump [rsp+8] = cs
+                "mov r14, [rsp + 8]",
+                "mov dx, 0x3FD",
+                "9904: in al, dx",
+                "test al, 0x20",
+                "jz 9904b",
+                "mov dx, 0x3F8",
+                "mov al, 'C'; out dx, al", "mov al, 'S'; out dx, al", "mov al, '='; out dx, al",
+                "mov rbx, r14",
+                "mov cx, 16",
+                "9905: mov al, 0x30",
+                "mov r14, rbx",
+                "shr r14, 60",
+                "cmp r14b, 10",
+                "jb 9906f",
+                "add al, 7",
+                "9906: add al, r14b",
+                "out dx, al",
+                "shl rbx, 4",
+                "dec cx",
+                "jnz 9905b",
+                "mov al, 0x0D; out dx, al", "mov al, 0x0A; out dx, al",
+                "mov rdx, r15",
+
+                "mov rdx, [rdx + 24]",
+
+                "iretq",
+            kernel_stack_top = in(reg) kernel_stack_top,
+            ctx = in(reg) ctx_ptr,
+            options(noreturn)
         );
     }
-
-    // Should never reach here
-    unreachable!("[SCHED] Bootstrap context resumed — this is a bug");
 }
 
-/// Called from the PIT timer interrupt handler.
-///
-/// Increments tick counters, checks quantum expiry, and sets the
-/// `NEED_RESCHEDULE` flag if the current task should be preempted.
-pub fn tick() {
-    if !ACTIVE.load(Ordering::Relaxed) { return; }
-
-    let needs = SCHEDULER.lock().tick();
-    if needs {
-        NEED_RESCHEDULE.store(true, Ordering::SeqCst);
+pub fn tick(regs: &AllRegisters) {
+    let mut sched = SCHEDULER.lock();
+    if sched.tick() {
+        drop(sched);
+        reschedule(regs);
     }
 }
 
-/// Perform a context switch if one is pending.
-///
-/// Called after returning from an interrupt (in the timer handler
-/// epilogue) or voluntarily via `yield_now()`.
-pub fn reschedule() {
-    if !ACTIVE.load(Ordering::Relaxed) { return; }
-    NEED_RESCHEDULE.store(false, Ordering::SeqCst);
-
-    // Disable interrupts during the switch to prevent re-entrancy
-    unsafe { core::arch::asm!("cli", options(nomem, nostack)); }
-
-    let (old_rsp_ptr, new_rsp_ptr) = {
-        let mut sched = SCHEDULER.lock();
-
-        // Put current task back in its queue
-        sched.requeue_current();
-
-        // Pick the next task
-        let next = sched.pick_next();
-        if next == NO_TASK || next == sched.current {
-            // Nothing to switch to — re-enable interrupts and return
-            unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
-            return;
-        }
-
-        let old_slot = sched.current;
-        sched.current = next;
-
-        if let Some(ref mut t) = sched.tasks[next] {
-            t.state = TaskState::Running;
-            t.ticks_used = 0;
-        }
-
-        // Get raw pointers to rsp fields (safe: tasks array is static)
-        let old_ptr = &mut sched.tasks[old_slot]
-            .as_mut().unwrap().context.rsp as *mut u64;
-        let new_ptr = &sched.tasks[next]
-            .as_ref().unwrap().context.rsp as *const u64;
-
-        (old_ptr, new_ptr)
-        // Lock dropped here — new task can acquire it
-    };
-
-    unsafe {
-        switch::context_switch(old_rsp_ptr, new_rsp_ptr);
-        // We return here when switched BACK to this task
-        core::arch::asm!("sti", options(nomem, nostack));
-    }
-}
-
-/// Cooperative yield — voluntarily give up the CPU.
-pub fn yield_now() {
-    NEED_RESCHEDULE.store(true, Ordering::SeqCst);
-    reschedule();
-}
-
-/// Terminate the currently running task.
-pub fn exit_current() -> ! {
-    {
-        let mut sched = SCHEDULER.lock();
-        let slot = sched.current;
-        sched.kill(slot);
-    }
-    // Force a reschedule — we're dead, so pick another task
-    NEED_RESCHEDULE.store(true, Ordering::SeqCst);
-    reschedule();
-    unreachable!("[SCHED] Dead task resumed");
-}
-
-/// Check and handle pending reschedule (called from ISR epilogue).
 pub fn check_reschedule() {
-    if NEED_RESCHEDULE.load(Ordering::Relaxed) {
-        reschedule();
-    }
+    kprintln!("[RSCHED] Before int 49");
+    unsafe { core::arch::asm!("int 49"); }
+    kprintln!("[RSCHED] After int 49 (returned)");
 }
 
-// ── IPC Integration: Block / Wake ────────────────────────────────────────
+pub fn current_slot() -> usize {
+    SCHEDULER.lock().current
+}
 
-/// Block the currently running task with a typed reason.
-///
-/// The task is marked `Blocked` and removed from its run queue.
-/// A reschedule is forced so another task runs immediately.
-///
-/// The task will not be scheduled again until `wake_task()` is called.
-///
-/// # Interrupt Safety
-/// Interrupts are disabled before acquiring the SCHEDULER lock to prevent
-/// deadlock with the PIT timer ISR (which calls `tick()` → `SCHEDULER.lock()`).
-/// `reschedule()` handles re-enabling interrupts via `sti` after the context switch.
-pub fn block_current(reason: task::BlockReason) {
-    // Disable interrupts — prevents timer ISR from deadlocking on SCHEDULER lock
-    unsafe { core::arch::asm!("cli", options(nomem, nostack)); }
+pub fn current_pid() -> u64 {
+    let sched = SCHEDULER.lock();
+    sched.tasks[sched.current].as_ref().map(|t| t.id as u64).unwrap_or(0)
+}
 
-    {
-        let mut sched = SCHEDULER.lock();
-        let slot = sched.current;
-        if slot == task::NO_TASK {
-            unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
-            return;
-        }
+pub fn yield_now() {
+    if !ACTIVE.load(Ordering::SeqCst) { return; }
+    check_reschedule();
+}
 
-        // Extract priority first to avoid double mutable borrow
-        let (_priority, should_yield) = match sched.tasks[slot] {
-            Some(ref mut t) => {
-                if t.awake_pending {
-                    // We received a wakeup while preparing to block.
-                    // Clear the flag and return — do NOT block.
-                    t.awake_pending = false;
-                    (t.priority, false)
-                } else {
-                    t.state = task::TaskState::Blocked;
-                    (t.priority, true)
-                }
-            }
-            None => {
-                drop(sched);
-                unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
-                return;
+pub fn block_current(reason: BlockReason) {
+    kprintln!("[BLOCK] Blocking current task");
+    let mut sched = SCHEDULER.lock();
+    let slot = sched.current;
+    if let Some(ref mut task) = sched.tasks[slot] {
+        task.state = TaskState::Blocked;
+        sched.boost_for_reason(slot, reason);
+    }
+    drop(sched);
+    kprintln!("[BLOCK] Calling check_reschedule");
+    check_reschedule();
+    kprintln!("[BLOCK] check_reschedule returned (will loop)");
+}
+
+pub fn wake_task(task_id: TaskId) {
+    let mut sched = SCHEDULER.lock();
+    let slot = sched.tasks.iter().position(|t| t.as_ref().map(|x| x.id == task_id).unwrap_or(false));
+    if let Some(slot) = slot {
+        let (priority, awake_pending) = {
+            let task = sched.tasks[slot].as_mut().unwrap();
+            if let TaskState::Blocked = task.state {
+                task.state = TaskState::Ready;
+                (task.priority, false)
+            } else {
+                task.awake_pending = true;
+                (0, true)
             }
         };
-
-        if should_yield {
-            kprintln!("    [SCHED] Task {} blocked: {:?}", slot, reason);
-
-            // SPSC-aware cross-boost: if we (producer) are blocking because
-            // the ring is full, boost the *consumer* to drain it faster.
-            if let task::BlockReason::SpscRingFull { consumer_slot } = reason {
-                if consumer_slot != task::NO_TASK {
-                    sched.boost_for_reason(consumer_slot, reason);
-                }
-            }
-
-            drop(sched);
-            yield_now();
-        } else {
-            drop(sched);
-            unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
+        if !awake_pending {
+            sched.queues[priority].push_back(slot);
         }
     }
 }
 
-/// Wake a blocked task and apply SPSC-aware priority boosting.
-///
-/// Transitions the task from `Blocked` → `Ready`, applies
-/// `boost_for_reason()`, and enqueues it at its (possibly boosted)
-/// priority level.
-///
-/// Called from `ipc::channel` when:
-/// - Producer pushes data → consumer was blocked on empty ring
-/// - Consumer pops data → producer was blocked on full ring
-///
-/// # Interrupt Safety
-/// Interrupts are disabled to prevent deadlock with the PIT timer ISR.
-/// After the lock is released, `NEED_RESCHEDULE` is set so the boosted
-/// task gets CPU at the next timer tick.
-pub fn wake_task(slot: task::TaskId, reason: task::BlockReason) {
-    // Disable interrupts — prevents timer ISR from deadlocking on SCHEDULER lock
-    unsafe { core::arch::asm!("cli", options(nomem, nostack)); }
-
-    {
-        let mut sched = SCHEDULER.lock();
-
-        if let Some(ref mut t) = sched.tasks[slot] {
-            if t.state != task::TaskState::Blocked {
-                // Task is already awake (Running or Ready).
-                // Set awake_pending to handle the race where the task is ABOUT to block.
-                t.awake_pending = true;
-                
-                // Boost it so it processes the new data faster.
-                sched.boost_for_reason(slot, reason);
-                
-                drop(sched);
-                unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
-                return;
-            }
-
-            // Task was blocked. Clear any pending awake flag just in case.
-            t.awake_pending = false;
-
-            // SPSC-aware boost BEFORE setting Ready
-            sched.boost_for_reason(slot, reason);
-
-            // Now re-read priority (may have changed from boost)
-            if let Some(ref mut t) = sched.tasks[slot] {
-                t.state = task::TaskState::Ready;
-                t.ticks_used = 0;
-                let prio = t.priority;
-                sched.queues[prio].push_back(slot);
-                kprintln!("    [SCHED] Task {} woken → level {}", slot, prio);
-            }
-        }
-    }
-
-    unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
-
-    // Signal that a higher-priority task may now be runnable.
-    // The next timer tick will trigger the actual preemption.
-    NEED_RESCHEDULE.store(true, Ordering::SeqCst);
-}
-
-/// Get the slot index of the currently running task.
-///
-/// # Interrupt Safety
-/// Brief cli/sti to prevent deadlock with timer ISR.
-pub fn current_slot() -> task::TaskId {
-    unsafe { core::arch::asm!("cli", options(nomem, nostack)); }
-    let id = SCHEDULER.lock().current;
-    unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
-    id
-}
-
-// ── Trampoline & Idle Task ───────────────────────────────────────────────
-
-/// Called if a task's entry function returns. Terminates the task.
-pub extern "C" fn task_exit_trampoline() {
-    exit_current();
-}
-
-/// The idle task — runs when nothing else is ready.
-///
-/// `sti; hlt` enables interrupts and immediately halts the CPU.
-/// When an interrupt fires, execution resumes after `hlt`, we yield,
-/// and the scheduler picks a real task if one became ready.
-extern "C" fn idle_task() {
+pub fn wait_task(task_id: TaskId) {
     loop {
-        unsafe { core::arch::asm!("sti; hlt", options(nomem, nostack)); }
+        {
+            let sched = SCHEDULER.lock();
+            let exists = sched.tasks.iter().any(|t| t.as_ref().map(|x| x.id == task_id).unwrap_or(false));
+            if !exists { return; }
+        }
         yield_now();
     }
+}
+
+pub fn exit_current() -> ! {
+    let mut sched = SCHEDULER.lock();
+    let slot = sched.current;
+    sched.kill(slot);
+    drop(sched);
+    check_reschedule();
+    loop { unsafe { core::arch::asm!("hlt") }; }
+}
+
+pub fn spawn(entry: extern "C" fn(), name: &str, priority: usize) -> Option<TaskId> {
+    let mut sched = SCHEDULER.lock();
+    sched.spawn(entry, name, priority)
+}
+
+pub fn spawn_user(entry: u64, user_stack_top: u64, name: &str, priority: u8) -> Option<TaskId> {
+    let page_table = crate::memory::vmm::create_user_page_table()?;
+    spawn_user_with_page_table(entry, user_stack_top, name, priority, page_table)
+}
+
+pub fn spawn_user_with_page_table(
+    entry: u64,
+    user_stack_top: u64,
+    name: &str,
+    priority: u8,
+    page_table: u64,
+) -> Option<TaskId> {
+    spawn_user_with_page_table_and_trampoline(entry, user_stack_top, name, priority, page_table, 0)
+}
+
+pub fn spawn_user_with_page_table_and_trampoline(
+    entry: u64,
+    user_stack_top: u64,
+    name: &str,
+    priority: u8,
+    page_table: u64,
+    trampoline: u64,  // User-space address of trampoline code (0 = use kernel trampoline)
+) -> Option<TaskId> {
+    let mut sched = SCHEDULER.lock();
+    let slot = sched.find_free_slot()?;
+    let id = sched.next_id;
+    sched.next_id += 1;
+
+    let mut task = Task::new_user(id, entry, user_stack_top, name, priority as usize, page_table)?;
+    
+    // If a user-space trampoline address is provided, use it instead of kernel trampoline
+    if trampoline != 0 {
+        task.context.rip = trampoline;
+    }
+    
+    sched.tasks[slot] = Some(task);
+    sched.queues[priority as usize].push_back(slot);
+    
+    Some(id)
+}
+
+pub fn replace_current_task(
+    entry: u64,
+    user_stack_top: u64,
+    name: &str,
+    page_table: u64,
+    argc: u64,
+    argv: u64,
+) -> ! {
+    let (task_id, old_cwd) = {
+        let sched = SCHEDULER.lock();
+        let old_task = sched.tasks[sched.current].as_ref().unwrap();
+        (old_task.id, old_task.cwd.clone())
+    };
+
+    let mut new_task = Task::new_user(task_id, entry, user_stack_top, name, 1, page_table)
+        .expect("Failed to create new user task during exec");
+    
+    new_task.cwd = old_cwd;
+    new_task.state = TaskState::Running;
+    new_task.context.r14 = argc;
+    new_task.context.r15 = argv;
+    
+    let kernel_stack_top = new_task.kernel_stack_top;
+    let user_entry = new_task.user_entry;
+    let user_stack_top = new_task.user_stack_top;
+    let argc_val = new_task.context.r14;
+    let argv_val = new_task.context.r15;
+    
+    {
+        let mut sched = SCHEDULER.lock();
+        let slot = sched.current;
+        sched.tasks[slot] = Some(new_task);
+        
+        crate::arch::smp::set_current_kernel_stack(kernel_stack_top);
+        crate::arch::gdt::set_kernel_stack(kernel_stack_top);
+        crate::arch::syscall_entry::set_kernel_stack_ptr(kernel_stack_top);
+    }
+    
+    unsafe {
+        crate::arch::paging::load_cr3(page_table, 0);
+        core::arch::asm!(
+            "mov rsp, {0}",
+            "jmp {1}",
+            in(reg) kernel_stack_top - 8,
+            in(reg) switch::user_entry_trampoline,
+            in("r12") user_stack_top,
+            in("r13") user_entry,
+            in("r14") argc_val,
+            in("r15") argv_val,
+            options(noreturn)
+        );
+    }
+}
+
+pub fn reschedule(regs: &crate::arch::idt::AllRegisters) {
+    let mut sched = SCHEDULER.lock();
+    let old_slot = sched.current;
+
+    // Determine if we were in kernel (CPL=0) or user (CPL=3) mode
+    let was_cpl0 = (regs.cs & 3) == 0;
+
+    // Debug: print what we're saving
+    {
+        let name = sched.tasks[old_slot].as_ref().map(|t| t.name_str()).unwrap_or("???");
+        kprintln!("[RSCHED] Saving task {} '{}': rip={:#x}, cs={:#x}, user_rsp={:#x} [cpl0={}]", 
+            old_slot, name, regs.rip, regs.cs, regs.rsp, was_cpl0);
+    }
+
+    let mut should_requeue = false;
+    let mut prio = 0;
+    if let Some(ref mut task) = sched.tasks[old_slot] {
+        if task.state == TaskState::Running {
+            task.state = TaskState::Ready;
+            should_requeue = true;
+            prio = task.priority;
+        }
+        task.context.rax = regs.rax;
+        task.context.rbx = regs.rbx;
+        task.context.rcx = regs.rcx;
+        task.context.rdx = regs.rdx;
+        task.context.rbp = regs.rbp;
+        task.context.rsi = regs.rsi;
+        task.context.rdi = regs.rdi;
+        task.context.r8 = regs.r8;
+        task.context.r9 = regs.r9;
+        task.context.r10 = regs.r10;
+        task.context.r11 = regs.r11;
+        task.context.r12 = regs.r12;
+        task.context.r13 = regs.r13;
+        task.context.r14 = regs.r14;
+        task.context.r15 = regs.r15;
+        task.context.rip = regs.rip;
+        task.context.cs = regs.cs;
+        task.context.rflags = regs.rflags;
+        if was_cpl0 {
+            // CPL=0: int 49 or timer int fired while in kernel (inside a syscall).
+            // CPU pushed only 3 values (RIP, CS, RFLAGS) — no SS:RSP.
+            // frame_ptr points at AllRegisters (15 GPRs + error + RIP+CS+RFLAGS + 2 stale slots).
+            // Pre-interrupt kernel RSP S = frame_ptr + 128 + 24 = frame_ptr + 152.
+            // When restoring, we use a 3-push IRETQ (no SS:RSP), so context.rsp = S.
+            let frame_ptr = regs as *const AllRegisters as u64;
+            task.context.rsp = frame_ptr + 152;   // S = pre-interrupt kernel RSP
+            task.context.ss = 0x10;
+            crate::kprintln!("[RSCHED_SAVE] cpl0 task={} frame_ptr={:#x} saved_rsp={:#x} rip={:#x}",
+                old_slot, frame_ptr, task.context.rsp, task.context.rip);
+        } else {
+            // CPL=3: interrupt fired from user mode. CPU pushed 5 values (SS, RSP, RFLAGS, CS, RIP).
+            // The user RSP is at regs.rsp (AllRegisters offset 152).
+            // When restoring, we use a 5-push IRETQ, and context.rsp = user RSP.
+            task.context.rsp = regs.rsp;
+            task.context.ss = regs.ss;
+        }
+    }
+
+    if should_requeue {
+        sched.queues[prio].push_back(old_slot);
+    }
+
+    let new_slot = sched.pick_next();
+    if new_slot == NO_TASK || new_slot == old_slot {
+        if let Some(ref mut t) = sched.tasks[old_slot] {
+            t.state = TaskState::Running;
+        }
+        return;
+    }
+
+    sched.current = new_slot;
+    let task = sched.tasks[new_slot].as_mut().expect("Picked empty slot");
+    task.state = TaskState::Running;
+
+    let ctx_ptr = &task.context as *const _ as u64;
+    let new_cr3 = task.page_table;
+    let kernel_stack_top = task.kernel_stack_top;
+    let cs = task.context.cs;
+    
+    crate::kprintln!("[RSCHED_SW] -> task={} '{}' kstack_top={:#x} ctx.rsp={:#x} ctx.rip={:#x} ctx.cs={:#x} r12={:#x} r13={:#x}",
+        task.id, task.name_str(), kernel_stack_top, task.context.rsp, task.context.rip, task.context.cs,
+        task.context.r12, task.context.r13);
+    
+    crate::arch::smp::set_current_kernel_stack(kernel_stack_top);
+    crate::arch::gdt::set_kernel_stack(kernel_stack_top);
+    
+    drop(sched);
+
+    unsafe {
+        crate::arch::paging::load_cr3(new_cr3, 0);
+
+        let is_target_kernel = (cs & 3) == 0;
+
+        if is_target_kernel {
+            // Kernel target: use same 5-push IRETQ as user (SS=0x10, RSP from context)
+            // This avoids a pre-existing GPF bug with 3-push IRETQ on kernel→kernel switches
+            let rsp_from_kstack = kernel_stack_top;
+            core::arch::asm!(
+                "mov rsp, r8",
+                // Push SS (kernel data segment)
+                "push qword ptr [rdx + 152]",
+                // Push RSP from saved context.rsp
+                "push qword ptr [rdx + 144]",
+                // Push RFLAGS, CS, RIP for IRETQ
+                "push qword ptr [rdx + 136]",
+                "push qword ptr [rdx + 128]",
+                "push qword ptr [rdx + 120]",
+                // Restore all GP registers from context
+                "mov rax, [rdx + 0]",
+                "mov rbx, [rdx + 8]",
+                "mov rcx, [rdx + 16]",
+                "mov rbp, [rdx + 32]",
+                "mov rsi, [rdx + 40]",
+                "mov rdi, [rdx + 48]",
+                "mov r8,  [rdx + 56]",
+                "mov r9,  [rdx + 64]",
+                "mov r10, [rdx + 72]",
+                "mov r11, [rdx + 80]",
+                "mov r12, [rdx + 88]",
+                "mov r13, [rdx + 96]",
+                "mov r14, [rdx + 104]",
+                "mov r15, [rdx + 112]",
+                "mov rdx, [rdx + 24]",
+                // Reload segment registers (user mode may have dirtied them)
+                "push rax",
+                "mov ax, 0x10",
+                "mov ds, ax",
+                "mov es, ax",
+                "mov ss, ax",
+                "xor ax, ax",
+                "mov fs, ax",
+                "pop rax",
+                "iretq",
+                in("rdx") ctx_ptr,
+                in("r8") rsp_from_kstack,
+                options(noreturn)
+            );
+        } else {
+            // User target: 5-push IRETQ (SS, RSP, RFLAGS, CS, RIP)
+            core::arch::asm!(
+                // rdx holds ctx_ptr, r8 holds kernel_stack_top
+                "mov rsp, r8",
+                // Push SS
+                "push qword ptr [rdx + 152]",
+                // Push user RSP from saved context.rsp (NOT r12)
+                "push qword ptr [rdx + 144]",
+                // Push RFLAGS
+                "push qword ptr [rdx + 136]",
+                // Push CS
+                "push qword ptr [rdx + 128]",
+                // Push RIP
+                "push qword ptr [rdx + 120]",
+                // Restore all GP registers
+                "mov rax, [rdx + 0]",
+                "mov rbx, [rdx + 8]",
+                "mov rcx, [rdx + 16]",
+                "mov rbp, [rdx + 32]",
+                "mov rsi, [rdx + 40]",
+                "mov rdi, [rdx + 48]",
+                "mov r8,  [rdx + 56]",
+                "mov r9,  [rdx + 64]",
+                "mov r10, [rdx + 72]",
+                "mov r11, [rdx + 80]",
+                "mov r12, [rdx + 88]",
+                "mov r13, [rdx + 96]",
+                "mov r14, [rdx + 104]",
+                "mov r15, [rdx + 112]",
+                "mov rdx, [rdx + 24]",
+                // Reload segment registers (user mode may have dirtied them)
+                "push rax",
+                "mov ax, 0x10",
+                "mov ds, ax",
+                "mov es, ax",
+                "mov ss, ax",
+                "xor ax, ax",
+                "mov fs, ax",
+                "pop rax",
+                "iretq",
+                in("rdx") ctx_ptr,
+                in("r8") kernel_stack_top,
+                options(noreturn)
+            );
+        }
+    }
+}
+
+pub fn init() {
+    kprintln!("  [SCHED] Initialized");
+}
+
+#[no_mangle]
+pub extern "C" fn task_exit_trampoline() -> ! {
+    exit_current();
 }

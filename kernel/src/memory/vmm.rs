@@ -4,7 +4,7 @@
 //! Provides map/unmap/translate for kernel and user virtual addresses.
 
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::arch::paging::{self, PageTable, flags, PAGE_SIZE};
+use crate::arch::paging::{self, PageTable, PageTableEntry, flags, PAGE_SIZE};
 use crate::memory::pmm;
 use crate::kprintln;
 
@@ -71,6 +71,31 @@ impl VirtualMemoryManager {
         }
     }
 
+    /// Map a virtual address to a physical address with specific flags.
+    pub fn map_page_with_flags(&mut self, virt: u64, phys: u64, flags: u64) -> Result<(), &'static str> {
+        unsafe {
+            let pml4 = &mut *(phys_to_virt(self.pml4_phys) as *mut PageTable);
+
+            // Walk PML4 → PDPT (level 1)
+            let pdpt = get_or_create_table(pml4, paging::pml4_index(virt), flags, 1)?;
+
+            // Walk PDPT → PD (level 2)
+            let pd = get_or_create_table(pdpt, paging::pdpt_index(virt), flags, 2)?;
+
+            // Walk PD → PT (level 3)
+            let pt = get_or_create_table(pd, paging::pd_index(virt), flags, 3)?;
+
+            // Set PT entry
+            let pt_idx = paging::pt_index(virt);
+            pt.entry_mut(pt_idx).set_address(phys, flags);
+            
+            // Flush TLB for this page to ensure consistency
+            paging::invlpg(virt);
+        }
+
+        Ok(())
+    }
+
     /// Map a virtual address to a physical address.
     pub fn map_page(&mut self, virt: u64, phys: u64, user: bool) -> Result<(), &'static str> {
         let flags = flags::PRESENT | flags::WRITABLE
@@ -79,18 +104,20 @@ impl VirtualMemoryManager {
         unsafe {
             let pml4 = &mut *(phys_to_virt(self.pml4_phys) as *mut PageTable);
 
-            // Walk PML4 → PDPT
-            let pdpt = get_or_create_table(pml4, paging::pml4_index(virt), flags)?;
+            // Walk PML4 → PDPT (level 1)
+            let pdpt = get_or_create_table(pml4, paging::pml4_index(virt), flags, 1)?;
 
-            // Walk PDPT → PD
-            let pd = get_or_create_table(pdpt, paging::pdpt_index(virt), flags)?;
+            // Walk PDPT → PD (level 2)
+            let pd = get_or_create_table(pdpt, paging::pdpt_index(virt), flags, 2)?;
 
-            // Walk PD → PT
-            let pt = get_or_create_table(pd, paging::pd_index(virt), flags)?;
+            // Walk PD → PT (level 3)
+            let pt = get_or_create_table(pd, paging::pd_index(virt), flags, 3)?;
 
             // Set PT entry
             let pt_idx = paging::pt_index(virt);
             pt.entry_mut(pt_idx).set_address(phys, flags);
+            
+            paging::invlpg(virt);
         }
 
         Ok(())
@@ -100,19 +127,15 @@ impl VirtualMemoryManager {
     /// If `on_demand` is true, the mapping is created without a physical page (PRESENT bit clear).
     pub fn map_user_page(&mut self, virt: u64, on_demand: bool) -> Result<(), &'static str> {
         if on_demand {
-            // For on-demand paging, we leave the PRESENT bit clear but set a software bit
-            // to indicate it's an allocated user page that needs to be faulted in.
-            // Let's use bit 9 (Available for OS) as the "ON_DEMAND" bit.
-            let flags = flags::USER | flags::WRITABLE | (1 << 9); // Bit 9 is available
-
+            let flags = flags::USER | flags::WRITABLE | (1 << 9);
             unsafe {
                 let pml4 = &mut *(phys_to_virt(self.pml4_phys) as *mut PageTable);
-                let pdpt = get_or_create_table(pml4, paging::pml4_index(virt), flags)?;
-                let pd = get_or_create_table(pdpt, paging::pdpt_index(virt), flags)?;
-                let pt = get_or_create_table(pd, paging::pd_index(virt), flags)?;
-
+                let pdpt = get_or_create_table(pml4, paging::pml4_index(virt), flags, 1)?;
+                let pd = get_or_create_table(pdpt, paging::pdpt_index(virt), flags, 2)?;
+                let pt = get_or_create_table(pd, paging::pd_index(virt), flags, 3)?;
                 let pt_idx = paging::pt_index(virt);
-                pt.entry_mut(pt_idx).set_address(0, flags); // No physical address yet
+                pt.entry_mut(pt_idx).set_address(0, flags);
+                paging::invlpg(virt);
             }
             Ok(())
         } else {
@@ -128,21 +151,32 @@ impl VirtualMemoryManager {
         // For now, let's look up the entry.
         unsafe {
             let pml4 = &mut *(phys_to_virt(self.pml4_phys) as *mut PageTable);
-            
+
             let pml4_e = pml4.entry(paging::pml4_index(virt));
-            if !pml4_e.is_present() { return Err("PML4 entry not present"); }
+            if !pml4_e.is_present() { 
+                kprintln!("[PF] PML4 entry not present for {:#x}", virt);
+                return Err("PML4 entry not present"); 
+            }
 
             let pdpt = &mut *(phys_to_virt(pml4_e.physical_address()) as *mut PageTable);
             let pdpt_e = pdpt.entry(paging::pdpt_index(virt));
-            if !pdpt_e.is_present() { return Err("PDPT entry not present"); }
+            if !pdpt_e.is_present() { 
+                kprintln!("[PF] PDPT entry not present for {:#x}", virt);
+                return Err("PDPT entry not present"); 
+            }
 
             let pd = &mut *(phys_to_virt(pdpt_e.physical_address()) as *mut PageTable);
             let pd_e = pd.entry(paging::pd_index(virt));
-            if !pd_e.is_present() { return Err("PD entry not present"); }
+            if !pd_e.is_present() { 
+                kprintln!("[PF] PD entry not present for {:#x}", virt);
+                return Err("PD entry not present"); 
+            }
 
             let pt = &mut *(phys_to_virt(pd_e.physical_address()) as *mut PageTable);
             let pt_idx = paging::pt_index(virt);
             let pt_e = pt.entry_mut(pt_idx);
+
+            kprintln!("[PF] Fault at {:#x}, Error: {:#x}, PTE flags: {:#x}", virt, _error_code, pt_e.flags());
 
             // Check if bit 9 (ON_DEMAND) is set and it's NOT present
             if !pt_e.is_present() && (pt_e.flags() & (1 << 9)) != 0 {
@@ -150,14 +184,17 @@ impl VirtualMemoryManager {
                 let phys = pmm::alloc_page().ok_or("OOM: cannot allocate physical page for fault")?;
                 // Zero the page
                 core::ptr::write_bytes(phys_to_virt(phys) as *mut u8, 0, PAGE_SIZE);
-                
-                // Update entry: set present, set physical address, keep user/writable flags
-                let flags = pt_e.flags() | flags::PRESENT;
+
+                // Update entry: set present, set physical address, KEEP existing flags (except bit 9)
+                // Also ensure NO_EXECUTE is NOT set.
+                let mut flags = (pt_e.flags() & !(1 << 9)) | flags::PRESENT;
+                flags &= !flags::NO_EXECUTE;
+
                 pt_e.set_address(phys, flags);
-                
+
                 // Invalidate TLB
                 paging::invlpg(virt);
-                
+
                 Ok(())
             } else {
                 Err("Not an on-demand page")
@@ -248,27 +285,98 @@ impl VirtualMemoryManager {
     }
 }
 
+/// Split a 1GiB huge page (PDPT level) into a PD table with 512 x 2MiB entries.
+unsafe fn split_1gib_page(
+    entry: &mut PageTableEntry,
+    new_flags: u64,
+) -> Result<&'static mut PageTable, &'static str> {
+    let base_phys = entry.physical_address();
+    let huge_flags = entry.flags();
+    // Keep existing flags but ensure USER|WRITABLE are included from new_flags
+    let child_flags = (huge_flags | (new_flags & (flags::USER | flags::WRITABLE))) & !flags::HUGE_PAGE;
+    let child_huge_flags = child_flags | flags::HUGE_PAGE; // PD entries are still 2MiB huge pages
+
+    let pd_phys = crate::memory::pmm::alloc_page().ok_or("OOM")?;
+    let pd_virt = phys_to_virt(pd_phys) as *mut PageTable;
+    core::ptr::write_bytes(pd_virt, 0, 4096);
+
+    let pd = &mut *pd_virt;
+    for i in 0..512 {
+        pd.entry_mut(i).set_address(base_phys + (i as u64) * 0x200000, child_huge_flags);
+    }
+
+    let intermediate_flags = flags::PRESENT | flags::WRITABLE | (new_flags & flags::USER);
+    entry.set_address(pd_phys, intermediate_flags);
+    Ok(pd)
+}
+
+/// Split a 2MiB huge page (PD level) into a PT table with 512 x 4KiB entries.
+unsafe fn split_2mib_page(
+    entry: &mut PageTableEntry,
+    new_flags: u64,
+) -> Result<&'static mut PageTable, &'static str> {
+    let base_phys = entry.physical_address();
+    let huge_flags = entry.flags();
+    let child_flags = (huge_flags | (new_flags & (flags::USER | flags::WRITABLE))) & !flags::HUGE_PAGE;
+
+    let pt_phys = crate::memory::pmm::alloc_page().ok_or("OOM")?;
+    let pt_virt = phys_to_virt(pt_phys) as *mut PageTable;
+    core::ptr::write_bytes(pt_virt, 0, 4096);
+
+    let pt = &mut *pt_virt;
+    for i in 0..512 {
+        pt.entry_mut(i).set_address(base_phys + (i as u64) * 0x1000, child_flags);
+    }
+
+    let intermediate_flags = flags::PRESENT | flags::WRITABLE | (new_flags & flags::USER);
+    entry.set_address(pt_phys, intermediate_flags);
+    Ok(pt)
+}
+
 /// Get or create a child page table at the given index.
+/// `level` indicates the granularity: 1 = PML4→PDPT, 2 = PDPT→PD, 3 = PD→PT.
 unsafe fn get_or_create_table(
     parent: &mut PageTable,
     index: usize,
-    _new_flags: u64,
+    new_flags: u64,
+    level: u8,
 ) -> Result<&'static mut PageTable, &'static str> {
-    let entry = parent.entry(index);
+    let entry = parent.entry_mut(index);
     if entry.is_present() {
+        let present_flags = entry.flags();
+        
+        // Check for huge pages — must split to allow 4KiB page manipulation
+        if present_flags & flags::HUGE_PAGE != 0 {
+            return match level {
+                2 => split_1gib_page(entry, new_flags),
+                3 => split_2mib_page(entry, new_flags),
+                _ => return Err("Unexpected huge page at PML4 level"),
+            };
+        }
+
+        // If the table exists, ensure it has the necessary permissions (e.g. USER bit)
+        let current_flags = present_flags;
+        let needed_flags = new_flags & (flags::USER | flags::WRITABLE);
+        if (current_flags & needed_flags) != needed_flags {
+            let updated_flags = current_flags | needed_flags;
+            entry.set_address(entry.physical_address(), updated_flags);
+        }
         Ok(&mut *(phys_to_virt(entry.physical_address()) as *mut PageTable))
     } else {
         // Allocate a new page table
-        let new_phys = pmm::alloc_page().ok_or("OOM: cannot allocate page table")?;
-        let new_virt = phys_to_virt(new_phys) as *mut u8;
-        // Zero the new table
-        core::ptr::write_bytes(new_virt, 0, PAGE_SIZE);
-        
+        let new_phys = crate::memory::pmm::alloc_page().ok_or("OOM")?;
+        let new_virt = phys_to_virt(new_phys) as *mut PageTable;
+
+        // CRITICAL: Zero out the new page table!
+        unsafe {
+            core::ptr::write_bytes(new_virt as *mut u8, 0, 4096);
+        }
+
         // We ensure that intermediate tables are mapped with standard generic permissions
         // like USER and WRITABLE so they don't restrict the PT level permissions.
-        let intermediate_flags = flags::PRESENT | flags::WRITABLE | flags::USER;
+        let intermediate_flags = flags::PRESENT | flags::WRITABLE | (new_flags & flags::USER);
         parent.entry_mut(index).set_address(new_phys, intermediate_flags);
-        Ok(&mut *(new_virt as *mut PageTable))
+        Ok(&mut *new_virt)
     }
 }
 
@@ -278,4 +386,39 @@ pub fn init() {
     kprintln!("    VMM: Active PML4 at {:#x}, Recursive mapping at index {}", vmm.pml4_phys, VirtualMemoryManager::RECURSIVE_ENTRY);
     
     *VMM.lock() = Some(vmm);
+}
+
+/// Create a new page table for a user process.
+///
+/// Allocates a fresh PML4, copies kernel-space entries (indices 256–511)
+/// from the kernel CR3, and sets up the recursive mapping at [510] pointing
+/// to the new table.  The result: per-process user address spaces (indices
+/// 0–255) while sharing a single kernel image — true process isolation.
+pub fn create_user_page_table() -> Option<u64> {
+    let new_pml4_phys = pmm::alloc_page()?;
+    let new_pml4_virt = phys_to_virt(new_pml4_phys) as *mut paging::PageTable;
+
+    unsafe {
+        core::ptr::write_bytes(new_pml4_virt as *mut u8, 0, PAGE_SIZE);
+
+        let kernel_cr3 =
+            crate::arch::idt::KERNEL_PML4.load(core::sync::atomic::Ordering::Relaxed);
+        let kernel_pml4_virt = phys_to_virt(kernel_cr3) as *const paging::PageTable;
+
+        // Copy higher-half entries (kernel mappings: indices 256–511)
+        for i in 256..512 {
+            let entry = (*kernel_pml4_virt).entry(i);
+            if entry.is_present() {
+                (*new_pml4_virt).entry_mut(i).set_raw(entry.raw());
+            }
+        }
+
+        // Override the recursive-mapping entry so it points to *this* PML4
+        let flags = flags::PRESENT | flags::WRITABLE | flags::NO_EXECUTE;
+        (*new_pml4_virt)
+            .entry_mut(VirtualMemoryManager::RECURSIVE_ENTRY)
+            .set_address(new_pml4_phys, flags);
+    }
+
+    Some(new_pml4_phys)
 }

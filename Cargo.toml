@@ -11,10 +11,16 @@ members = [
     "userland/libc",
     "userland/bde",
     "userland/shell",
+    "userland/editor",
+    "userland/usb_driver",
+    "userland/hello",
     "libs/beast_ring",
     "libs/beast_capability",
     "libs/beast_alloc",
     "libs/beast_font",
+    "libs/beast_syscall",
+    "libs/beast_crt",
+    "userland/test_keyboard",
 ]
 
 [workspace.package]

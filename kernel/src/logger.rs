@@ -33,6 +33,7 @@ impl SerialWriter {
             port_write(self.port + 3, 0x03); // 8 bits, no parity, 1 stop
             port_write(self.port + 2, 0xC7); // Enable FIFO, clear, 14-byte
             port_write(self.port + 4, 0x0B); // IRQs enabled, RTS/DSR set
+            port_write(self.port + 1, 0x01); // Enable "Data Ready" interrupt
         }
     }
 }
@@ -57,10 +58,12 @@ pub fn init() {
 /// Internal print function — outputs to serial AND framebuffer console.
 #[doc(hidden)]
 pub fn _kprint(args: fmt::Arguments) {
-    SERIAL_WRITER.lock().write_fmt(args).unwrap();
+    // Use try_lock() to avoid deadlocks when called from page fault handler
+    // or other interrupt contexts that might already hold the lock.
+    if let Some(mut serial) = SERIAL_WRITER.try_lock() {
+        serial.write_fmt(args).ok();
+    }
     // Also write to framebuffer console if available.
-    // Use try_lock() to avoid deadlocks when called from framebuffer::init()
-    // (which holds the FRAMEBUFFER lock while calling kprintln!).
     if let Some(mut console) = crate::drivers::console::CONSOLE.try_lock() {
         if console.width > 0 {
             console.write_fmt(args).ok();

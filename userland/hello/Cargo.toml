@@ -1,0 +1,8 @@
+[package]
+name = "hello"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+beast_syscall = { path = "../../libs/beast_syscall" }
+beast_crt = { path = "../../libs/beast_crt" }

@@ -84,7 +84,7 @@ pub struct Scheduler {
     /// Ticks until next priority boost.
     boost_countdown: u64,
     /// Next free task ID.
-    next_id: usize,
+    pub next_id: usize,
     /// Whether the scheduler has been started.
     pub started: bool,
 }
@@ -118,7 +118,11 @@ impl Scheduler {
         self.next_id += 1;
 
         let prio = priority.min(PRIORITY_LEVELS - 1);
-        let task = Task::new(id, entry, name, prio)?;
+        
+        // Kernel tasks share the kernel page table
+        let page_table = crate::arch::paging::read_cr3() & !0xFFF;
+        
+        let task = Task::new(id, entry, name, prio, page_table)?;
         self.tasks[slot] = Some(task);
         self.queues[prio].push_back(slot);
 
@@ -126,7 +130,7 @@ impl Scheduler {
         Some(slot)
     }
 
-    fn find_free_slot(&self) -> Option<usize> {
+    pub fn find_free_slot(&self) -> Option<usize> {
         self.tasks.iter().position(|t| t.is_none())
     }
 
@@ -176,13 +180,11 @@ impl Scheduler {
         for level in 0..PRIORITY_LEVELS {
             while let Some(slot) = self.queues[level].pop_front() {
                 if let Some(ref task) = self.tasks[slot] {
-                    if task.state == TaskState::Ready || task.state == TaskState::Running {
+                    if task.state == TaskState::Ready {
                         return slot;
                     }
                 }
                 // Dead/blocked entry — already popped, skip it.
-                // (It was stale in the queue; block_current()/kill()
-                //  should have removed it, but this is a safety net.)
             }
         }
         NO_TASK
@@ -265,8 +267,8 @@ impl Scheduler {
                     }
                 }
             }
-            // Sleep / voluntary yield — no boost (intentional)
-            BlockReason::Sleep | BlockReason::Yield => {}
+            // Sleep / voluntary yield / waiting — no boost (intentional)
+            BlockReason::Sleep | BlockReason::Yield | BlockReason::Waiting => {}
         }
     }
 

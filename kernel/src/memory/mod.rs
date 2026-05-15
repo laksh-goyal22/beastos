@@ -14,12 +14,12 @@ use crate::kprintln;
 ///
 /// `regions`: (base_addr, length, is_usable) from bootloader memory map.
 /// `hhdm_offset`: Higher Half Direct Map offset from Limine.
-pub fn init(entries: &[&limine::memmap::Entry], hhdm_offset: u64) {
+pub fn init(entries: &[&limine::memmap::Entry], hhdm_offset: u64, kernel_phys_start: u64, kernel_phys_end: u64) {
     kprintln!("  [MEM] Setting HHDM offset: {:#x}", hhdm_offset);
     vmm::set_hhdm_offset(hhdm_offset);
 
     kprintln!("  [MEM] Initializing PMM...");
-    pmm::init(entries);
+    pmm::init(entries, kernel_phys_start, kernel_phys_end);
 
     kprintln!("  [MEM] Initializing VMM...");
     vmm::init();

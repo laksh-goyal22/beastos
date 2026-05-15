@@ -1,0 +1,12 @@
+[package]
+name = "test_keyboard"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+beast_syscall = { path = "../../libs/beast_syscall" }
+beast_crt = { path = "../../libs/beast_crt" }
+
+[[bin]]
+name = "test_keyboard"
+path = "src/main.rs"

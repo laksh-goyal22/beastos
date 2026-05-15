@@ -2,8 +2,6 @@
 //!
 //! Tracks physical page availability using a bitmap.
 //! Each bit represents one 4KiB page.
-//!
-//! Performance: O(n/64) allocation via 64-bit word scanning.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 use crate::kprintln;
@@ -13,8 +11,7 @@ use crate::sync::Spinlock;
 pub const PAGE_SIZE: usize = 4096;
 
 /// Maximum supported physical memory: 4 GiB (for now).
-/// This gives us 1M pages → 128 KiB bitmap.
-const MAX_PAGES: usize = 1024 * 1024; // 4 GiB / 4 KiB
+const MAX_PAGES: usize = 1024 * 1024;
 const BITMAP_WORDS: usize = MAX_PAGES / 64;
 
 /// Bitmap: 1 = free, 0 = used/reserved.
@@ -25,11 +22,8 @@ static TOTAL_PAGES: AtomicUsize = AtomicUsize::new(0);
 /// Number of currently free pages.
 static FREE_PAGES: AtomicUsize = AtomicUsize::new(0);
 
-/// Initialize the PMM from a memory map.
-///
-/// `regions` is an iterator of (base_addr, length, is_usable) tuples.
-/// Called early in boot before any allocation.
-pub fn init(entries: &[&limine::memmap::Entry]) {
+/// Initialize the PMM from a memory map and explicit kernel range.
+pub fn init(entries: &[&limine::memmap::Entry], kernel_start: u64, kernel_end: u64) {
     let mut bitmap = BITMAP.lock();
     // Start with everything marked as used (0)
     for i in 0..BITMAP_WORDS {
@@ -39,17 +33,17 @@ pub fn init(entries: &[&limine::memmap::Entry]) {
     let mut free_count = 0;
     // Mark usable regions as free
     for entry in entries {
-        if entry.type_ != limine::memmap::MEMMAP_USABLE { continue; }
+        if entry.type_ == limine::memmap::MEMMAP_USABLE {
+            let base = entry.base;
+            let length = entry.length;
+            let start_page = (base as usize + PAGE_SIZE - 1) / PAGE_SIZE;
+            let end_page = ((base + length) as usize) / PAGE_SIZE;
 
-        let base = entry.base;
-        let length = entry.length;
-        let start_page = (base as usize + PAGE_SIZE - 1) / PAGE_SIZE; // round up
-        let end_page = ((base + length) as usize) / PAGE_SIZE;        // round down
-
-        for page in start_page..end_page {
-            if page < MAX_PAGES {
-                set_bit(&mut *bitmap, page);
-                free_count += 1;
+            for page in start_page..end_page {
+                if page < MAX_PAGES {
+                    set_bit(&mut *bitmap, page);
+                    free_count += 1;
+                }
             }
         }
     }
@@ -57,10 +51,20 @@ pub fn init(entries: &[&limine::memmap::Entry]) {
     TOTAL_PAGES.store(free_count, Ordering::SeqCst);
     FREE_PAGES.store(free_count, Ordering::SeqCst);
 
+    // CRITICAL: Reserve the kernel and modules range explicitly.
+    let k_start_page = kernel_start as usize / PAGE_SIZE;
+    let k_end_page = (kernel_end as usize + PAGE_SIZE - 1) / PAGE_SIZE;
+    for page in k_start_page..k_end_page {
+        if page < MAX_PAGES && test_bit(&*bitmap, page) {
+            clear_bit(&mut *bitmap, page);
+            FREE_PAGES.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
     // Reserve page 0 (null pointer guard) and first 1 MiB (legacy hardware)
-    let reserved_end = (1024 * 1024) / PAGE_SIZE; // 256 pages
+    let reserved_end = (1024 * 1024) / PAGE_SIZE;
     for page in 0..reserved_end {
-        if test_bit(&*bitmap, page) {
+        if page < MAX_PAGES && test_bit(&*bitmap, page) {
             clear_bit(&mut *bitmap, page);
             FREE_PAGES.fetch_sub(1, Ordering::SeqCst);
         }
@@ -75,12 +79,10 @@ pub fn init(entries: &[&limine::memmap::Entry]) {
 }
 
 /// Allocate a single physical page.
-/// Returns the physical address, or None if OOM.
 pub fn alloc_page() -> Option<u64> {
     let mut bitmap = BITMAP.lock();
     for i in 0..BITMAP_WORDS {
         if bitmap[i] != 0 {
-            // Find first set bit (free page)
             let bit = bitmap[i].trailing_zeros() as usize;
             let page = i * 64 + bit;
             clear_bit(&mut *bitmap, page);
@@ -103,7 +105,6 @@ pub fn free_page(phys_addr: u64) {
 }
 
 /// Allocate `count` contiguous physical pages.
-/// Returns the base physical address, or None if unavailable.
 pub fn alloc_contiguous(count: usize) -> Option<u64> {
     if count == 0 { return None; }
     let mut bitmap = BITMAP.lock();
@@ -115,7 +116,6 @@ pub fn alloc_contiguous(count: usize) -> Option<u64> {
             if run_len == 0 { run_start = page; }
             run_len += 1;
             if run_len == count {
-                // Found a run — mark as used
                 for p in run_start..run_start + count {
                     clear_bit(&mut *bitmap, p);
                     FREE_PAGES.fetch_sub(1, Ordering::SeqCst);
@@ -129,29 +129,12 @@ pub fn alloc_contiguous(count: usize) -> Option<u64> {
     None
 }
 
-/// Get number of free pages.
-pub fn free_count() -> usize {
-    FREE_PAGES.load(Ordering::SeqCst)
-}
-
-/// Get total usable pages.
-pub fn total_count() -> usize {
-    TOTAL_PAGES.load(Ordering::SeqCst)
-}
-
-// Bitmap helpers (word-level bit manipulation)
+pub fn free_count() -> usize { FREE_PAGES.load(Ordering::SeqCst) }
+pub fn total_count() -> usize { TOTAL_PAGES.load(Ordering::SeqCst) }
 
 #[inline(always)]
-fn set_bit(bitmap: &mut [u64], page: usize) {
-    bitmap[page / 64] |= 1u64 << (page % 64);
-}
-
+fn set_bit(bitmap: &mut [u64], page: usize) { bitmap[page / 64] |= 1u64 << (page % 64); }
 #[inline(always)]
-fn clear_bit(bitmap: &mut [u64], page: usize) {
-    bitmap[page / 64] &= !(1u64 << (page % 64));
-}
-
+fn clear_bit(bitmap: &mut [u64], page: usize) { bitmap[page / 64] &= !(1u64 << (page % 64)); }
 #[inline(always)]
-fn test_bit(bitmap: &[u64], page: usize) -> bool {
-    (bitmap[page / 64] & (1u64 << (page % 64))) != 0
-}
+fn test_bit(bitmap: &[u64], page: usize) -> bool { (bitmap[page / 64] & (1u64 << (page % 64))) != 0 }

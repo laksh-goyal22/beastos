@@ -34,8 +34,8 @@ impl GdtEntry {
     pub const fn kernel_code() -> Self {
         Self {
             limit_low: 0xFFFF, base_low: 0, base_mid: 0,
-            access: 0x9A,        // P=1, DPL=0, S=1, E=1, R=1
-            flags_limit_hi: 0xAF, // G=1, L=1 (64-bit), Limit[19:16]=F
+            access: 0x9A,
+            flags_limit_hi: 0xAF,
             base_hi: 0,
         }
     }
@@ -44,7 +44,7 @@ impl GdtEntry {
     pub const fn kernel_data() -> Self {
         Self {
             limit_low: 0xFFFF, base_low: 0, base_mid: 0,
-            access: 0x92,        // P=1, DPL=0, S=1, W=1
+            access: 0x92,
             flags_limit_hi: 0xCF,
             base_hi: 0,
         }
@@ -54,7 +54,7 @@ impl GdtEntry {
     pub const fn user_data() -> Self {
         Self {
             limit_low: 0xFFFF, base_low: 0, base_mid: 0,
-            access: 0xF2,        // P=1, DPL=3, S=1, W=1
+            access: 0xF2,
             flags_limit_hi: 0xCF,
             base_hi: 0,
         }
@@ -64,7 +64,7 @@ impl GdtEntry {
     pub const fn user_code() -> Self {
         Self {
             limit_low: 0xFFFF, base_low: 0, base_mid: 0,
-            access: 0xFA,        // P=1, DPL=3, S=1, E=1, R=1
+            access: 0xFA,
             flags_limit_hi: 0xAF,
             base_hi: 0,
         }
@@ -108,25 +108,26 @@ impl Tss {
 /// 0x20: User Code   (selector 0x23 with RPL=3)
 /// 0x28: TSS Low     (16-byte system descriptor)
 /// 0x30: TSS High
-///
-/// Note: For SYSRET on AMD64, user data MUST be at STAR_SEL+0
-///       and user code at STAR_SEL+8. We use 0x18/0x20.
 #[repr(C, align(16))]
 struct GdtTable {
-    entries: [u64; 7], // 5 standard + 2 for TSS (16-byte descriptor)
+    entries: [u64; 7],
 }
 
 static GDT: Spinlock<GdtTable> = Spinlock::new(GdtTable { entries: [0; 7] });
 static TSS: Spinlock<Tss> = Spinlock::new(Tss::new());
 
 /// Kernel-mode interrupt stack (16KB, page-aligned).
+/// Force into .bss so the page table maps it writable — Rust places
+/// zero-initialized statics in .rodata when there's no interior mutability.
 #[repr(C, align(4096))]
 struct KernelStack([u8; 16384]);
+#[link_section = ".bss"]
 static KERNEL_STACK: KernelStack = KernelStack([0; 16384]);
 
 /// Double-fault IST stack (8KB).
 #[repr(C, align(4096))]
 struct IstStack([u8; 8192]);
+#[link_section = ".bss"]
 static IST_STACK: IstStack = IstStack([0; 8192]);
 
 #[repr(C, packed)]
@@ -141,16 +142,16 @@ pub fn init() {
     let mut gdt = GDT.lock();
 
     // Set up TSS with kernel stacks
-    let kernel_stack_top = addr_of!(KERNEL_STACK) as u64 + 16384; // stack grows down
+    let kernel_stack_top = addr_of!(KERNEL_STACK) as u64 + 16384;
     tss.rsp0 = kernel_stack_top;
-    tss.ist[0] = addr_of!(IST_STACK) as u64 + 8192;   // IST1 for double fault
+    tss.ist[0] = addr_of!(IST_STACK) as u64 + 8192;
 
     // Build GDT entries
-    gdt.entries[0] = 0; // Null
-    gdt.entries[1] = gdt_entry_to_u64(GdtEntry::kernel_code()); // 0x08
-    gdt.entries[2] = gdt_entry_to_u64(GdtEntry::kernel_data()); // 0x10
-    gdt.entries[3] = gdt_entry_to_u64(GdtEntry::user_data());   // 0x18
-    gdt.entries[4] = gdt_entry_to_u64(GdtEntry::user_code());   // 0x20
+    gdt.entries[0] = 0;
+    gdt.entries[1] = gdt_entry_to_u64(GdtEntry::kernel_code());
+    gdt.entries[2] = gdt_entry_to_u64(GdtEntry::kernel_data());
+    gdt.entries[3] = gdt_entry_to_u64(GdtEntry::user_data());
+    gdt.entries[4] = gdt_entry_to_u64(GdtEntry::user_code());
 
     // TSS descriptor (16 bytes = 2 entries)
     let tss_base = (&*tss as *const Tss) as u64;
@@ -167,7 +168,7 @@ pub fn init() {
         asm!("lgdt [{}]", in(reg) &gdt_ptr, options(nostack));
 
         // Reload segment registers
-        // CS: far return trick (AT&T syntax)
+        // CS: far return trick
         asm!(
             "pushq $0x08",           // kernel code selector
             "leaq 2f(%rip), {tmp}",
@@ -178,7 +179,8 @@ pub fn init() {
             options(att_syntax)
         );
 
-        // DS, SS, ES, FS, GS = kernel data (0x10)
+        // DS, SS, ES, FS = kernel data (0x10)
+        // GS is handled separately via MSR
         asm!(
             "mov ax, 0x10",
             "mov ds, ax",
@@ -186,18 +188,80 @@ pub fn init() {
             "mov ss, ax",
             "xor ax, ax",
             "mov fs, ax",
-            "mov gs, ax",
             out("ax") _,
         );
 
         // Load TSS (selector = 0x28)
         asm!("ltr ax", in("ax") 0x28u16, options(nostack));
+
+        // ============================================================
+        // CRITICAL: Set up GS base for per-CPU data
+        // ============================================================
+        
+        // Get pointer to CPU 0's per-CPU data structure
+        let cpu0_data = crate::arch::smp::get_cpu_data_ptr(0) as u64;
+        
+        // IA32_GS_BASE (MSR 0xC0000100) - User GS base
+        // Used by swapgs when entering user mode
+        let msr_gs_base: u32 = 0xC0000100;
+        asm!(
+            "wrmsr",
+            in("ecx") msr_gs_base,
+            in("eax") cpu0_data as u32,
+            in("edx") (cpu0_data >> 32) as u32,
+            options(nostack)
+        );
+        
+        // IA32_KERNEL_GS_BASE (MSR 0xC0000101) - Kernel GS base
+        // Used by swapgs when returning from user mode
+        let msr_kernel_gs: u32 = 0xC0000101;
+        asm!(
+            "wrmsr",
+            in("ecx") msr_kernel_gs,
+            in("eax") cpu0_data as u32,
+            in("edx") (cpu0_data >> 32) as u32,
+            options(nostack)
+        );
+        
+        // Now load GS selector to 0x10 (kernel data segment)
+        // The actual base comes from the MSR above
+        asm!(
+            "mov ax, 0x10",
+            "mov gs, ax",
+            out("ax") _,
+        );
+
+        // Verify GS base is set correctly (debug)
+        let mut gs_base_low: u32;
+        let mut gs_base_high: u32;
+        asm!(
+            "rdmsr",
+            in("ecx") msr_gs_base,
+            out("eax") gs_base_low,
+            out("edx") gs_base_high,
+            options(nostack)
+        );
+        let gs_base = ((gs_base_high as u64) << 32) | (gs_base_low as u64);
+        kprintln!("  [GDT] GS base set to {:#x}", gs_base);
     }
 
     // Initialize per-CPU data for BSP (Bootstrap Processor)
     crate::arch::smp::init_percpu(0, true, kernel_stack_top);
 
+    crate::arch::syscall_entry::init_kernel_stack_ptr(kernel_stack_top);
+    
     kprintln!("  [GDT] Loaded with TSS and Per-CPU data initialized");
+}
+
+
+/// Update the kernel stack for the current CPU (used on context switch).
+pub fn set_kernel_stack(stack_top: u64) {
+    TSS.lock().rsp0 = stack_top;
+    crate::arch::syscall_entry::set_kernel_stack_ptr(stack_top);
+    unsafe {
+        let cpu_data_ptr = crate::arch::smp::get_cpu_data_ptr(0);
+        (*cpu_data_ptr).kernel_stack.store(stack_top, core::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// Convert a GdtEntry struct to a raw u64.
@@ -209,16 +273,70 @@ fn gdt_entry_to_u64(entry: GdtEntry) -> u64 {
 /// Build the low 8 bytes of a 16-byte TSS descriptor.
 fn tss_descriptor_low(base: u64, limit: u64) -> u64 {
     let mut desc: u64 = 0;
-    desc |= limit & 0xFFFF;                         // Limit[15:0]
-    desc |= (base & 0xFFFF) << 16;                  // Base[15:0]
-    desc |= ((base >> 16) & 0xFF) << 32;            // Base[23:16]
-    desc |= 0x89u64 << 40;                          // Type=9 (64-bit TSS), P=1
-    desc |= ((limit >> 16) & 0xF) << 48;            // Limit[19:16]
-    desc |= ((base >> 24) & 0xFF) << 56;            // Base[31:24]
+    desc |= limit & 0xFFFF;
+    desc |= (base & 0xFFFF) << 16;
+    desc |= ((base >> 16) & 0xFF) << 32;
+    desc |= 0x89u64 << 40;
+    desc |= ((limit >> 16) & 0xF) << 48;
+    desc |= ((base >> 24) & 0xFF) << 56;
     desc
 }
 
 /// Build the high 8 bytes of a 16-byte TSS descriptor.
 fn tss_descriptor_high(base: u64) -> u64 {
-    (base >> 32) & 0xFFFF_FFFF // Base[63:32]
+    (base >> 32) & 0xFFFF_FFFF
+}
+
+/// Set Kernel GS Base (for per-CPU data)
+pub unsafe fn set_kernel_gs_base(base: u64) {
+    let msr: u32 = 0xC0000101;  // IA32_KERNEL_GS_BASE
+    asm!(
+        "wrmsr",
+        in("ecx") msr,
+        in("eax") base as u32,
+        in("edx") (base >> 32) as u32,
+        options(nostack)
+    );
+}
+
+/// Get Kernel GS Base
+pub unsafe fn get_kernel_gs_base() -> u64 {
+    let mut low: u32 = 0;
+    let mut high: u32 = 0;
+    let msr: u32 = 0xC0000101;
+    asm!(
+        "rdmsr",
+        in("ecx") msr,
+        out("eax") low,
+        out("edx") high,
+        options(nostack)
+    );
+    ((high as u64) << 32) | (low as u64)
+}
+
+/// Set User GS Base
+pub unsafe fn set_user_gs_base(base: u64) {
+    let msr: u32 = 0xC0000100;  // IA32_GS_BASE
+    asm!(
+        "wrmsr",
+        in("ecx") msr,
+        in("eax") base as u32,
+        in("edx") (base >> 32) as u32,
+        options(nostack)
+    );
+}
+
+/// Get User GS Base
+pub unsafe fn get_user_gs_base() -> u64 {
+    let mut low: u32 = 0;
+    let mut high: u32 = 0;
+    let msr: u32 = 0xC0000100;
+    asm!(
+        "rdmsr",
+        in("ecx") msr,
+        out("eax") low,
+        out("edx") high,
+        options(nostack)
+    );
+    ((high as u64) << 32) | (low as u64)
 }
