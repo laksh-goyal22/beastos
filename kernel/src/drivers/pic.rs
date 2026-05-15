@@ -50,14 +50,31 @@ pub fn init() {
         outb(PIC2_DATA, ICW4_8086);
         io_wait();
 
-        // Unmask: timer (IRQ0), keyboard (IRQ1), cascade (IRQ2)
-        outb(PIC1_DATA, 0b1111_1000); // Enable IRQ 0, 1, 2
-        outb(PIC2_DATA, 0b1111_1111); // Mask all PIC2
+        // Enable: keyboard (IRQ1), cascade (IRQ2), serial (IRQ4)
+        // Timer (IRQ0) is enabled later after IDT init to prevent spurious interrupts
+        outb(PIC1_DATA, 0b1110_1001); // Mask IRQ 0, 3, 5, 6, 7
+        outb(PIC2_DATA, 0b1110_1111); // Enable IRQ 12 (Bit 4)
     }
 
     kprintln!("    PIC remapped: IRQ0-7 → vec {}-{}, IRQ8-15 → vec {}-{}",
         PIC1_OFFSET, PIC1_OFFSET + 7,
         PIC2_OFFSET, PIC2_OFFSET + 7);
+}
+
+/// Enable timer IRQ (IRQ0) — call after IDT is initialized.
+pub fn enable_timer() {
+    unsafe {
+        let mask = inb(PIC1_DATA);
+        outb(PIC1_DATA, mask & !0x01); // Clear bit 0 to unmask
+    }
+}
+
+/// Disable timer IRQ (IRQ0).
+pub fn disable_timer() {
+    unsafe {
+        let mask = inb(PIC1_DATA);
+        outb(PIC1_DATA, mask | 0x01); // Set bit 0 to mask
+    }
 }
 
 /// Send End-of-Interrupt to PIC.

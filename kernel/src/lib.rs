@@ -19,21 +19,22 @@
 
 #![no_std]
 #![no_main]
-#![feature(abi_x86_interrupt)]
 // #![feature(const_mut_refs)]
-// #![feature(naked_functions)]
 
-// extern crate alloc;
+extern crate alloc;
+
+// Include the trampolines assembly file
+core::arch::global_asm!(include_str!("arch/asm/trampolines.S"));
 
 // pub mod acpi;
 pub mod arch;
 pub mod drivers;
-// pub mod fs;
+pub mod fs;
 pub mod ipc;
 pub mod logger;
 pub mod memory;
 pub mod scheduler;
 pub mod sync;
 pub mod syscall;
+pub mod storage;
 // pub mod time;
-

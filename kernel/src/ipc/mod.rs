@@ -9,3 +9,4 @@
 //! *exactly why* a task blocked and makes perfect boosting decisions.
 
 pub mod channel;
+pub mod spsc_with_boost;

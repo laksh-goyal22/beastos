@@ -1,16 +1,18 @@
 //! Task Control Block and CPU Context
-//!
-//! Each task has a unique ID, priority level, saved CPU context,
-//! and its own kernel stack for context switching.
 
 use crate::memory::{pmm, vmm};
+use crate::scheduler::switch;
 
 /// Page size (4 KiB).
 const PAGE_SIZE: usize = 4096;
 
-/// Kernel stack: 4 pages = 16 KiB per task.
-pub const TASK_STACK_PAGES: usize = 4;
+/// Kernel stack: 32 pages = 128 KiB per task.
+pub const TASK_STACK_PAGES: usize = 32;
 pub const TASK_STACK_SIZE: usize = TASK_STACK_PAGES * PAGE_SIZE;
+
+/// User stack: 8 pages = 32 KiB per user task.
+pub const USER_STACK_PAGES: usize = 8;
+pub const USER_STACK_SIZE: usize = USER_STACK_PAGES * PAGE_SIZE;
 
 /// Maximum concurrent tasks.
 pub const MAX_TASKS: usize = 64;
@@ -34,112 +36,97 @@ pub enum TaskState {
 }
 
 /// Why a task blocked — enables SPSC-aware priority boosting.
-///
-/// Standard MLFQ guesses based on "did it block on I/O?".
-/// Beast OS knows the *exact* reason because of SPSC ring integration,
-/// allowing 10x better scheduling decisions with zero overhead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockReason {
-    /// Consumer waiting on an empty SPSC ring → boost the *producer* to fill it.
     SpscRingEmpty { producer_slot: TaskId },
-    /// Producer waiting on a full SPSC ring → boost the *consumer* instead.
     SpscRingFull { consumer_slot: TaskId },
-    /// Waiting on a mutex/spinlock.
     MutexContention,
-    /// Voluntary sleep (timer-based).
     Sleep,
-    /// Disk / file I/O.
     FileRead,
-    /// Yielded voluntarily (cooperative).
     Yield,
+    Waiting,
 }
 
-/// Saved CPU context — only the stack pointer.
-///
-/// Callee-saved registers (rbx, rbp, r12–r15) live on the task's
-/// own stack and are pushed/popped by the `context_switch` stub.
+/// Saved CPU context — all general purpose registers + segments + stack pointer.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct Context {
-    pub rsp: u64,
+    pub rax: u64, pub rbx: u64, pub rcx: u64, pub rdx: u64,
+    pub rbp: u64, pub rsi: u64, pub rdi: u64, pub r8: u64,
+    pub r9: u64, pub r10: u64, pub r11: u64, pub r12: u64,
+    pub r13: u64, pub r14: u64, pub r15: u64,
+    pub rip: u64, pub cs: u64, pub rflags: u64, pub rsp: u64, pub ss: u64,
 }
 
 impl Context {
     pub const fn empty() -> Self {
-        Self { rsp: 0 }
+        Self {
+            rax: 0, rbx: 0, rcx: 0, rdx: 0,
+            rbp: 0, rsi: 0, rdi: 0, r8: 0,
+            r9: 0, r10: 0, r11: 0, r12: 0,
+            r13: 0, r14: 0, r15: 0,
+            rip: 0, cs: 0, rflags: 0, rsp: 0, ss: 0,
+        }
     }
 }
+
+use alloc::string::String;
+use alloc::vec::Vec;
+use alloc::boxed::Box;
+use crate::fs::vfs::File;
+use crate::sync::Spinlock;
 
 /// Task Control Block.
 pub struct Task {
     pub id: TaskId,
     pub state: TaskState,
-    /// Current MLFQ level (0 = highest priority).
     pub priority: usize,
-    /// Saved priority before inheritance boost.
     pub base_priority: usize,
-    /// Ticks consumed at current priority level.
+    pub ticks: u64,
     pub ticks_used: u64,
-    /// CPU context (saved stack pointer).
     pub context: Context,
-    /// Physical base of the allocated kernel stack.
+    pub page_table: u64,
+    pub kernel_stack_top: u64,
     pub stack_phys: u64,
-    /// Virtual base of the kernel stack (via HHDM).
     pub stack_virt: u64,
-    /// Debug name (fixed buffer, no alloc).
+    pub user_entry: u64,
+    pub user_stack_top: u64,
     pub name: [u8; 32],
     pub name_len: usize,
-    /// Flag to prevent lost wakeups if wake_task is called before block_current.
     pub awake_pending: bool,
+    pub waiting_on: Option<TaskId>,
+    pub cwd: String,
+    pub fds: Spinlock<Vec<Option<Box<dyn File>>>>,
+    pub brk: u64,          // Program break (end of heap, for sys_brk)
 }
 
 impl Task {
-    /// Allocate a kernel stack and prepare the task for first dispatch.
-    ///
-    /// The stack is set up so that `context_switch` will "return" into
-    /// `entry` the first time the task is scheduled.
-    pub fn new(
+    pub fn new_with_args(
         id: TaskId,
-        entry: extern "C" fn(),
+        entry: extern "C" fn(u64, u64),
+        arg1: u64,
+        arg2: u64,
         name_str: &str,
         priority: usize,
+        page_table: u64,
     ) -> Option<Self> {
-        // Allocate physical pages for the kernel stack
         let phys = pmm::alloc_contiguous(TASK_STACK_PAGES)?;
         let virt = vmm::phys_to_virt(phys);
+        unsafe { core::ptr::write_bytes(virt as *mut u8, 0, TASK_STACK_SIZE); }
 
-        // Zero the stack
-        unsafe {
-            core::ptr::write_bytes(virt as *mut u8, 0, TASK_STACK_SIZE);
-        }
-
-        // Build the initial stack frame so context_switch can "return" into
-        // the task_start_trampoline, which does `sti; ret` into the real entry.
-        //
-        // Layout (growing downward):
-        //   [stack_top - 8 ]  task_exit_trampoline  ← if entry() returns
-        //   [stack_top - 16]  entry                 ← trampoline's `ret` target
-        //   [stack_top - 24]  task_start_trampoline ← context_switch's `ret` target
-        //   [stack_top - 32]  rbp  = 0
-        //   [stack_top - 40]  rbx  = 0
-        //   [stack_top - 48]  r12  = 0
-        //   [stack_top - 56]  r13  = 0
-        //   [stack_top - 64]  r14  = 0
-        //   [stack_top - 72]  r15  = 0    ← initial rsp
         let stack_top = virt + TASK_STACK_SIZE as u64;
-        let sp = stack_top as *mut u64;
-        unsafe {
-            sp.offset(-1).write(super::task_exit_trampoline as *const () as u64);         // if entry() returns
-            sp.offset(-2).write(entry as *const () as u64);                               // trampoline ret → entry
-            sp.offset(-3).write(super::switch::task_start_trampoline as *const () as u64); // context_switch ret → trampoline
-            sp.offset(-4).write(0); // rbp
-            sp.offset(-5).write(0); // rbx
-            sp.offset(-6).write(0); // r12
-            sp.offset(-7).write(0); // r13
-            sp.offset(-8).write(0); // r14
-            sp.offset(-9).write(0); // r15
-        }
-
+        
+        // Set up initial stack frame
+        // Stack grows downward, so we start at the top and subtract
+        let mut rsp = stack_top;
+        
+        // Push a dummy return address (in case the function returns, it will crash)
+        rsp -= 8;
+        unsafe { *(rsp as *mut u64) = 0xdeadbeefdeadbeef; }
+        
+        // Push the function arguments (rdi, rsi are set from r12, r13 in our trampoline)
+        // But since we're jumping directly, we'll set rdi/rsi in the asm
+        
         let mut name_buf = [0u8; 32];
         let len = name_str.len().min(32);
         name_buf[..len].copy_from_slice(&name_str.as_bytes()[..len]);
@@ -149,17 +136,113 @@ impl Task {
             state: TaskState::Ready,
             priority,
             base_priority: priority,
+            ticks: 0,
             ticks_used: 0,
-            context: Context { rsp: stack_top - 72 },
+            context: Context {
+                rax: 0, rbx: 0, rcx: 0, rdx: 0,
+                rbp: 0, rsi: 0, rdi: 0, r8: 0,
+                r9: 0, r10: 0, r11: 0, 
+                r12: entry as u64,  // Entry point function pointer
+                r13: arg1, r14: arg2, r15: 0,
+                rip: switch::task_start_trampoline as *const () as u64,
+                cs: 0x08,
+                rflags: 0x202,
+                rsp: rsp,
+                ss: 0x10,
+            },
+            page_table,
+            kernel_stack_top: stack_top,
             stack_phys: phys,
             stack_virt: virt,
+            user_entry: arg1,
+            user_stack_top: arg2,
             name: name_buf,
             name_len: len,
             awake_pending: false,
+            waiting_on: None,
+            cwd: String::from("/"),
+            fds: Spinlock::new(alloc::vec![None, None, None]),
+            brk: 0,
         })
     }
 
-    /// Debug name as &str.
+    pub fn new(
+        id: TaskId,
+        entry: extern "C" fn(),
+        name_str: &str,
+        priority: usize,
+        page_table: u64,
+    ) -> Option<Self> {
+        let entry_wrapped = unsafe { core::mem::transmute::<extern "C" fn(), extern "C" fn(u64, u64)>(entry) };
+        Self::new_with_args(id, entry_wrapped, 0, 0, name_str, priority, page_table)
+    }
+    
+    pub fn new_user(
+        id: TaskId,
+        entry: u64,
+        user_stack_top: u64,
+        name_str: &str,
+        priority: usize,
+        page_table_cr3: u64,
+    ) -> Option<Self> {
+        let kernel_stack_phys = pmm::alloc_contiguous(TASK_STACK_PAGES)?;
+        let kernel_stack_virt = vmm::phys_to_virt(kernel_stack_phys);
+        unsafe { core::ptr::write_bytes(kernel_stack_virt as *mut u8, 0, TASK_STACK_SIZE); }
+
+        let kernel_stack_top = kernel_stack_virt + TASK_STACK_SIZE as u64;
+
+        crate::kprintln!("[NEW_USER] id={} entry={:#x} user_stack={:#x} kstack_phys={:#x} kstack_virt={:#x} kstack_top={:#x}",
+            id, entry, user_stack_top, kernel_stack_phys, kernel_stack_virt, kernel_stack_top);
+        
+        // Write user entry to stack for user trampoline
+        let ret_addr_ptr = (kernel_stack_top - 8) as *mut u64;
+        unsafe {
+            ret_addr_ptr.write(entry);
+        }
+
+        let mut name_buf = [0u8; 32];
+        let len = name_str.len().min(32);
+        name_buf[..len].copy_from_slice(&name_str.as_bytes()[..len]);
+
+        const HEAP_START: u64 = 0x0000_2000_0000_0000;
+
+        Some(Self {
+            id,
+            state: TaskState::Ready,
+            priority,
+            base_priority: priority,
+            ticks: 0,
+            ticks_used: 0,
+            kernel_stack_top,
+            context: Context {
+                rax: 0, rbx: 0, rcx: 0, rdx: 0,
+                rbp: 0, rsi: 0, rdi: 0, r8: 0,
+                r9: 0, r10: 0, r11: 0,
+                r12: user_stack_top,
+                r13: entry,
+                r14: 0,
+                r15: 0,
+                rip: switch::user_entry_trampoline as *const () as u64,
+                cs: 0x23,  // User code segment
+                rflags: 0x202,
+                rsp: user_stack_top,
+                ss: 0x1b,  // User data segment
+            },
+            page_table: page_table_cr3,
+            stack_phys: kernel_stack_phys,
+            stack_virt: kernel_stack_virt,
+            user_entry: entry,
+            user_stack_top,
+            name: name_buf,
+            name_len: len,
+            awake_pending: false,
+            waiting_on: None,
+            cwd: String::from("/"),
+            fds: Spinlock::new(alloc::vec![None, None, None]),
+            brk: HEAP_START,
+        })
+    }
+
     pub fn name_str(&self) -> &str {
         core::str::from_utf8(&self.name[..self.name_len]).unwrap_or("???")
     }

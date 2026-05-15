@@ -1,0 +1,7 @@
+[package]
+name = "beast_crt"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+beast_syscall = { path = "../beast_syscall" }

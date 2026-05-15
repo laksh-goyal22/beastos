@@ -27,6 +27,7 @@ SECTIONS
 {
     /* Limine maps the kernel at this virtual address */
     . = 0xFFFFFFFF80100000;
+    _kernel_start = .;
 
     /* ── Code ─────────────────────────────────────────────────────────── */
     .text : {
@@ -43,6 +44,7 @@ SECTIONS
     /* ── Limine Boot Requests (MUST be writable — bootloader writes back) ── */
     .requests : {
         KEEP(*(.requests_start_marker))
+        KEEP(*(.requests_base_revision))
         KEEP(*(.requests .requests.*))
         KEEP(*(.requests_end_marker))
         . = ALIGN(4K);

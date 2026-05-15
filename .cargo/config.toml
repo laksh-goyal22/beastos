@@ -6,7 +6,7 @@ runner = "scripts/run_qemu.sh"
 rustflags = [
     "-C", "link-arg=-Tboot/linker/kernel.ld",
     "-C", "link-arg=-zmax-page-size=0x1000",
-    "-C", "link-arg=--strip-all",
+    "-C", "link-arg=",
     "-C", "code-model=kernel",
     "-C", "relocation-model=static",
 ]

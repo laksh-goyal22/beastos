@@ -44,6 +44,11 @@ pub fn get_ticks() -> u64 {
     TICKS.load(Ordering::Relaxed)
 }
 
+/// Get the timer frequency in Hz.
+pub fn get_hz() -> u64 {
+    HZ.load(Ordering::SeqCst) as u64
+}
+
 /// Busy-wait for approximately `ms` milliseconds.
 pub fn sleep_ms(ms: u64) {
     let hz = HZ.load(Ordering::SeqCst) as u64;

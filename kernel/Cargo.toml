@@ -16,3 +16,15 @@ beast_ring = { path = "../libs/beast_ring" }
 beast_alloc = { path = "../libs/beast_alloc" }
 beast_capability = { path = "../libs/beast_capability" }
 beast_font = { path = "../libs/beast_font" }
+
+[build-dependencies]
+bootloader = "0.9.27"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+opt-level = 3

@@ -200,8 +200,7 @@ impl<T: Copy + Default, const N: usize> Channel<T, N> {
             let consumer = self.consumer_slot.load(Ordering::Acquire);
             if consumer != NO_TASK {
                 crate::scheduler::wake_task(
-                    consumer,
-                    BlockReason::SpscRingEmpty { producer_slot: self.producer_slot.load(Ordering::Acquire) }
+                    consumer
                 );
             }
         }
@@ -218,8 +217,7 @@ impl<T: Copy + Default, const N: usize> Channel<T, N> {
                 // (us). This is correct: we (consumer) got CPU time to
                 // drain, so producer can now push again.
                 crate::scheduler::wake_task(
-                    producer,
-                    BlockReason::SpscRingFull { consumer_slot: self.consumer_slot.load(Ordering::Acquire) }
+                    producer
                 );
             }
         }
