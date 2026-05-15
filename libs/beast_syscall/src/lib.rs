@@ -40,6 +40,8 @@ pub const SYS_IO_URING_STATS: u64 = 303;
 pub const SYS_SET_LATENCY_CLASS: u64 = 310;
 pub const SYS_PRESSURE: u64 = 311;
 pub const SYS_SYSTEM_METRICS: u64 = 312;
+pub const SYS_IPC_CREATE_RING: u64 = 230;
+pub const SYS_IPC_CONNECT: u64 = 231;
 
 #[inline(always)]
 pub unsafe fn syscall0(num: u64) -> i64 {
@@ -291,4 +293,12 @@ pub fn pressure() -> u64 {
 
 pub fn system_metrics(buf: &mut [u64; 4]) -> i64 {
     unsafe { syscall2(SYS_SYSTEM_METRICS, buf.as_mut_ptr() as u64, 0) }
+}
+
+pub fn ipc_create_ring(capacity: u64, partner_pid: u64) -> i64 {
+    unsafe { syscall2(SYS_IPC_CREATE_RING, capacity, partner_pid) }
+}
+
+pub fn ipc_connect(ring_id: u64) -> i64 {
+    unsafe { syscall1(SYS_IPC_CONNECT, ring_id) }
 }

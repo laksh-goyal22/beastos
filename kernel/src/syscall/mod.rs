@@ -153,6 +153,8 @@ pub extern "C" fn syscall_dispatch(
         204 => match sys_port_out(a1 as u16, a2 as u32, a3 as u8) { Ok(_) => 0, Err(e) => e as i64 },
          210 => sys_fb_info(a1),
          220 => sys_map_phys(a1, a2, a3),
+         230 => sys_ipc_create_ring(a1, a2),
+         231 => sys_ipc_connect(a1),
          300 => sys_io_uring_setup(a1, a2),
          301 => sys_io_uring_enter(a1, a2, a3),
          302 => sys_io_uring_register(a1, a2, a3),
@@ -977,6 +979,68 @@ fn sys_system_metrics(out_ptr: u64) -> i64 {
 
 use crate::io_uring::IoUring;
 use spin::Mutex;
+
+const MAX_IPC_RINGS: usize = 64;
+static IPC_RINGS: Mutex<alloc::vec::Vec<Option<IpcRing>>> = Mutex::new(alloc::vec::Vec::new());
+
+struct IpcRing {
+    phys: u64,
+    producer_task: usize,
+    consumer_task: usize,
+    producer_page_table: u64,
+    consumer_page_table: u64,
+}
+
+fn sys_ipc_create_ring(capacity: u64, partner_pid: u64) -> i64 {
+    let slot = {
+        let sched = crate::scheduler::SCHEDULER.lock();
+        sched.current
+    };
+    let phys = match crate::memory::pmm::alloc_page() { Some(p) => p, None => return -1 };
+    let kvirt = crate::memory::vmm::phys_to_virt(phys);
+    unsafe { core::ptr::write_bytes(kvirt as *mut u8, 0, 4096); }
+    // Map ring at 0x7000_0000_0000 in producer's page table
+    let producer_pt = {
+        let sched = crate::scheduler::SCHEDULER.lock();
+        sched.tasks[slot].as_ref().map(|t| t.page_table).unwrap_or(0)
+    };
+    {
+        let mut vmm = crate::memory::vmm::VirtualMemoryManager::new(producer_pt);
+        use crate::arch::paging::flags;
+        let _ = vmm.map_page_with_flags(0x7000_0000_0000, phys, flags::PRESENT | flags::USER | flags::WRITABLE);
+    }
+    let ring = IpcRing {
+        phys, producer_task: slot, consumer_task: partner_pid as usize,
+        producer_page_table: producer_pt, consumer_page_table: 0,
+    };
+    let mut rings = IPC_RINGS.lock();
+    let id = rings.len();
+    rings.push(Some(ring));
+    id as i64
+}
+
+fn sys_ipc_connect(ring_id: u64) -> i64 {
+    let slot = {
+        let sched = crate::scheduler::SCHEDULER.lock();
+        sched.current
+    };
+    let mut rings = IPC_RINGS.lock();
+    let id = ring_id as usize;
+    if id >= rings.len() || rings[id].is_none() { return -1; }
+    let ring = rings[id].as_mut().unwrap();
+    if ring.consumer_task != slot { return -1; }
+    let consumer_pt = {
+        let sched = crate::scheduler::SCHEDULER.lock();
+        sched.tasks[slot].as_ref().map(|t| t.page_table).unwrap_or(0)
+    };
+    {
+        let mut vmm = crate::memory::vmm::VirtualMemoryManager::new(consumer_pt);
+        use crate::arch::paging::flags;
+        let _ = vmm.map_page_with_flags(0x7000_0000_0000, ring.phys, flags::PRESENT | flags::USER | flags::WRITABLE);
+    }
+    ring.consumer_page_table = consumer_pt;
+    ring.phys as i64
+}
 
 const MAX_IO_URINGS: usize = 64;
 static IO_URINGS: Mutex<alloc::vec::Vec<Option<IoUring>>> = Mutex::new(alloc::vec::Vec::new());
