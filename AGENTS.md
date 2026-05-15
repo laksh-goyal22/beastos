@@ -115,12 +115,21 @@
 - **FIXED**: Timer IRQ (vector 32) masked during early boot to prevent spurious interrupts before IDT is initialized; unmasked after IDT init via `pic::enable_timer()`
 - **BOOT CONFIRMED**: Kernel boots through all phases, loads userland ELF, reaches scheduler — full boot-to-userland verified
 
+### 2026-05-15 — Scheduler Fixes & Userland Stability
+- **FIXED**: Scheduler context switch on user→kernel transitions — now checks target CS (not current CR3) to select 3-push vs 5-push IRETQ path
+- **FIXED**: `context.rsp` for user tasks — changed from `kernel_stack_top - 8` to `user_stack_top` in `Task::new_user()`
+- **FIXED**: Trampoline copy truncated at 32 bytes (missing `iretq`) — increased to 64 bytes in `main.rs`
+- **FIXED**: exec `replace_current_task` register conflict — `in(reg)` could silently become no-op when source/dest registers matched; changed to explicit `in("r12")`/`in("r13")` constraints
+- **FIXED**: Guard page at `0x0` was writable — removed `WRITABLE` flag to catch null-pointer dereferences
+- **FIXED**: GPF at `iretq` on kernel→kernel context switch — reload DS, ES, SS, FS segment registers before IRETQ (user mode dirties them)
+- **REMOVED**: Redundant page mapping loop at `0x400000-0x404000` that overwrote ELF-loaded code with zero pages
+- **REMOVED**: Dead `heartbeat` test task
+- **SHELL BOOT CONFIRMED**: Hello → Shell launch via `exec()` works; shell waits for keyboard input
+
 ### Next Steps:
-1. Minor warning cleanup (unused structs in FAT32, unused vars)
-2. Editor dead_code warnings cleanup
-3. Boot test: verify kernel boots with new FAT32/devfs changes
+1. Async ring buffer I/O for zero-copy kernel-userspace communication
 
 ### Verification Command:
 ```bash
-wsl -d Ubuntu bash -lc "cd /home/laksh/beastos && cargo build --target x86_64-unknown-none"
+cd /home/laksh/beastos && make run
 ```

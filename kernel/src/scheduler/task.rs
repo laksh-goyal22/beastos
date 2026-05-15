@@ -47,6 +47,29 @@ pub enum BlockReason {
     Waiting,
 }
 
+/// I/O batching latency class — controls max wait time per submission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum LatencyClass {
+    Realtime = 0,    // 0µs max wait
+    Interactive = 1, // 5µs max wait
+    Normal = 2,      // 20µs max wait (default)
+    Batch = 3,       // 100µs max wait
+    PowerSave = 4,   // 200µs max wait
+}
+
+impl LatencyClass {
+    pub const fn max_wait_us(self) -> u64 {
+        match self {
+            LatencyClass::Realtime => 0,
+            LatencyClass::Interactive => 5,
+            LatencyClass::Normal => 20,
+            LatencyClass::Batch => 100,
+            LatencyClass::PowerSave => 200,
+        }
+    }
+}
+
 /// Saved CPU context — all general purpose registers + segments + stack pointer.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -98,6 +121,7 @@ pub struct Task {
     pub cwd: String,
     pub fds: Spinlock<Vec<Option<Box<dyn File>>>>,
     pub brk: u64,          // Program break (end of heap, for sys_brk)
+    pub latency_class: LatencyClass,
 }
 
 impl Task {
@@ -163,6 +187,7 @@ impl Task {
             cwd: String::from("/"),
             fds: Spinlock::new(alloc::vec![None, None, None]),
             brk: 0,
+            latency_class: LatencyClass::Normal,
         })
     }
 
@@ -240,6 +265,7 @@ impl Task {
             cwd: String::from("/"),
             fds: Spinlock::new(alloc::vec![None, None, None]),
             brk: HEAP_START,
+            latency_class: LatencyClass::Normal,
         })
     }
 

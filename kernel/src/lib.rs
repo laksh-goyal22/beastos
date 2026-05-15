@@ -27,6 +27,8 @@ extern crate alloc;
 core::arch::global_asm!(include_str!("arch/asm/trampolines.S"));
 
 // pub mod acpi;
+pub mod io_uring;
+pub mod pressure;
 pub mod arch;
 pub mod drivers;
 pub mod fs;

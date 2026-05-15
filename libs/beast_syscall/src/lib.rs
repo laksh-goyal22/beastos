@@ -33,6 +33,15 @@ pub const SYS_TAG: u64 = 103;
 pub const SYS_BOND_WIFI: u64 = 104;
 pub const SYS_SHARE: u64 = 106;
 pub const SYS_TIME_TRAVEL: u64 = 110;
+pub const SYS_IO_URING_SETUP: u64 = 300;
+pub const SYS_IO_URING_ENTER: u64 = 301;
+pub const SYS_IO_URING_REGISTER: u64 = 302;
+pub const SYS_IO_URING_STATS: u64 = 303;
+pub const SYS_SET_LATENCY_CLASS: u64 = 310;
+pub const SYS_PRESSURE: u64 = 311;
+pub const SYS_SYSTEM_METRICS: u64 = 312;
+pub const SYS_IPC_CREATE_RING: u64 = 230;
+pub const SYS_IPC_CONNECT: u64 = 231;
 
 #[inline(always)]
 pub unsafe fn syscall0(num: u64) -> i64 {
@@ -256,4 +265,40 @@ pub fn port_in(port: u16) -> i64 {
 
 pub fn port_out(port: u16, value: u32, width: u8) -> i64 {
     unsafe { syscall3(204, port as u64, value as u64, width as u64) }
+}
+
+pub fn io_uring_setup(entries: u64) -> i64 {
+    unsafe { syscall1(SYS_IO_URING_SETUP, entries) }
+}
+
+pub fn io_uring_enter(fd: u64, to_submit: u64, min_complete: u64) -> i64 {
+    unsafe { syscall3(SYS_IO_URING_ENTER, fd, to_submit, min_complete) }
+}
+
+pub fn io_uring_register(fd: u64, opcode: u64, arg: u64) -> i64 {
+    unsafe { syscall3(SYS_IO_URING_REGISTER, fd, opcode, arg) }
+}
+
+pub fn io_uring_stats(fd: u64, out_buf: &mut [u64; 5]) -> i64 {
+    unsafe { syscall2(SYS_IO_URING_STATS, fd, out_buf.as_mut_ptr() as u64) }
+}
+
+pub fn set_latency_class(class: u64) -> i64 {
+    unsafe { syscall1(SYS_SET_LATENCY_CLASS, class) }
+}
+
+pub fn pressure() -> u64 {
+    unsafe { syscall0(SYS_PRESSURE) as u64 }
+}
+
+pub fn system_metrics(buf: &mut [u64; 4]) -> i64 {
+    unsafe { syscall2(SYS_SYSTEM_METRICS, buf.as_mut_ptr() as u64, 0) }
+}
+
+pub fn ipc_create_ring(capacity: u64, partner_pid: u64) -> i64 {
+    unsafe { syscall2(SYS_IPC_CREATE_RING, capacity, partner_pid) }
+}
+
+pub fn ipc_connect(ring_id: u64) -> i64 {
+    unsafe { syscall1(SYS_IPC_CONNECT, ring_id) }
 }

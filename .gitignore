@@ -27,3 +27,4 @@ Thumbs.db
 *.log
 core.*
 .git_token
+test_write.txt

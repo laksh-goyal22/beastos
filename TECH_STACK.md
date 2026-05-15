@@ -27,6 +27,7 @@
 
 ## Scheduler & IPC
 - **MLFQ (Multi-Level Feedback Queue)**: Dynamic priority scheduling with anti-starvation boosting.
+- **Context Switch**: 3-push IRETQ for kernel→kernel, 5-push IRETQ for user→kernel/user. Segment registers (DS, ES, SS, FS) reloaded before IRETQ to prevent GPF from user-mode corruption.
 - **SPSC-Aware Boosting**: IPC channels (SPSC rings) are integrated with the scheduler. 
     - **Producer blocked (Full)**: Boosts consumer immediately to level 0.
     - **Consumer blocked (Empty)**: Boosts producer immediately to level 0 and prepares consumer for boost on wake.

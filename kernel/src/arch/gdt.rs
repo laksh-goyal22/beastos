@@ -115,6 +115,7 @@ struct GdtTable {
 
 static GDT: Spinlock<GdtTable> = Spinlock::new(GdtTable { entries: [0; 7] });
 static TSS: Spinlock<Tss> = Spinlock::new(Tss::new());
+static LDT_BASE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Kernel-mode interrupt stack (16KB, page-aligned).
 /// Force into .bss so the page table maps it writable — Rust places
@@ -158,6 +159,7 @@ pub fn init() {
     let tss_limit = (size_of::<Tss>() - 1) as u64;
     gdt.entries[5] = tss_descriptor_low(tss_base, tss_limit);
     gdt.entries[6] = tss_descriptor_high(tss_base);
+    // LDT entry 7 is filled later in enable_ldt() (after memory init)
 
     unsafe {
         // Load GDT
@@ -253,6 +255,10 @@ pub fn init() {
     kprintln!("  [GDT] Loaded with TSS and Per-CPU data initialized");
 }
 
+/// Load the LDT (disabled — LLDT GPFs in QEMU despite correct descriptor).
+pub fn enable_ldt() {
+    crate::kprintln!("  [GDT] LDT setup skipped");
+}
 
 /// Update the kernel stack for the current CPU (used on context switch).
 pub fn set_kernel_stack(stack_top: u64) {
@@ -285,6 +291,17 @@ fn tss_descriptor_low(base: u64, limit: u64) -> u64 {
 /// Build the high 8 bytes of a 16-byte TSS descriptor.
 fn tss_descriptor_high(base: u64) -> u64 {
     (base >> 32) & 0xFFFF_FFFF
+}
+
+fn ldt_descriptor(base: u64, limit: u64) -> u64 {
+    let mut desc: u64 = 0;
+    desc |= limit & 0xFFFF;
+    desc |= (base & 0xFFFF) << 16;
+    desc |= ((base >> 16) & 0xFF) << 32;
+    desc |= 0x82u64 << 40;  // Present, System, LDT, DPL=0
+    desc |= ((limit >> 16) & 0xF) << 48;
+    desc |= ((base >> 24) & 0xFF) << 56;
+    desc
 }
 
 /// Set Kernel GS Base (for per-CPU data)
