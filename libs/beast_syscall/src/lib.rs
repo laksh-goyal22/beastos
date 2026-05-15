@@ -33,6 +33,9 @@ pub const SYS_TAG: u64 = 103;
 pub const SYS_BOND_WIFI: u64 = 104;
 pub const SYS_SHARE: u64 = 106;
 pub const SYS_TIME_TRAVEL: u64 = 110;
+pub const SYS_IO_URING_SETUP: u64 = 300;
+pub const SYS_IO_URING_ENTER: u64 = 301;
+pub const SYS_IO_URING_REGISTER: u64 = 302;
 
 #[inline(always)]
 pub unsafe fn syscall0(num: u64) -> i64 {
@@ -256,4 +259,16 @@ pub fn port_in(port: u16) -> i64 {
 
 pub fn port_out(port: u16, value: u32, width: u8) -> i64 {
     unsafe { syscall3(204, port as u64, value as u64, width as u64) }
+}
+
+pub fn io_uring_setup(entries: u64) -> i64 {
+    unsafe { syscall1(SYS_IO_URING_SETUP, entries) }
+}
+
+pub fn io_uring_enter(fd: u64, to_submit: u64, min_complete: u64) -> i64 {
+    unsafe { syscall3(SYS_IO_URING_ENTER, fd, to_submit, min_complete) }
+}
+
+pub fn io_uring_register(fd: u64, opcode: u64, arg: u64) -> i64 {
+    unsafe { syscall3(SYS_IO_URING_REGISTER, fd, opcode, arg) }
 }

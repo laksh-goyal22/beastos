@@ -152,6 +152,9 @@ pub extern "C" fn syscall_dispatch(
         203 => match sys_port_in(a1 as u16) { Ok(v) => v as i64, Err(e) => e as i64 },
         204 => match sys_port_out(a1 as u16, a2 as u32, a3 as u8) { Ok(_) => 0, Err(e) => e as i64 },
          210 => sys_fb_info(a1),
+         300 => sys_io_uring_setup(a1, a2),
+         301 => sys_io_uring_enter(a1, a2, a3),
+         302 => sys_io_uring_register(a1, a2, a3),
          500 => sys_mkdir(a1, a2),
         _ => {
             -1
@@ -159,7 +162,7 @@ pub extern "C" fn syscall_dispatch(
     }
 }
 
-fn sys_read(fd: u64, buf_ptr: u64, count: u64) -> i64 {
+pub fn sys_read(fd: u64, buf_ptr: u64, count: u64) -> i64 {
     kprintln!("[SYS_READ] fd={} buf={:#x} count={}", fd, buf_ptr, count);
     if buf_ptr == 0 || count == 0 { return -22; }
 
@@ -309,7 +312,7 @@ fn sys_lseek(fd: u64, offset: u64) -> i64 {
     -9 // EBADF
 }
 
-fn sys_write(fd: u64, buf_ptr: u64, count: u64) -> i64 {
+pub fn sys_write(fd: u64, buf_ptr: u64, count: u64) -> i64 {
     if buf_ptr == 0 || count == 0 { return -22; }
 
     let (user_cr3, kernel_cr3, needs_switch) = {
@@ -884,6 +887,54 @@ fn sys_tag(_id: u64, _tag_ptr: u64, _tag_len: u64) -> i64 { 0 }
 fn sys_bond_wifi(_iface_ptr: u64, _iface_len: u64) -> i64 { 0 }
 fn sys_share(_file_ptr: u64, _file_len: u64, _user: u64) -> i64 { 0 }
 fn sys_time_travel(_seconds: u64) -> i64 { 0 }
+
+use crate::io_uring::IoUring;
+use spin::Mutex;
+
+const MAX_IO_URINGS: usize = 64;
+static IO_URINGS: Mutex<alloc::vec::Vec<Option<IoUring>>> = Mutex::new(alloc::vec::Vec::new());
+
+fn sys_io_uring_setup(entries: u64, _flags: u64) -> i64 {
+    let ring = IoUring::new(entries as u32);
+    if ring.is_none() { return -1; }
+    let ring = ring.unwrap();
+    let page_table = {
+        let sched = crate::scheduler::SCHEDULER.lock();
+        let slot = sched.current;
+        sched.tasks[slot].as_ref().map(|t| t.page_table).unwrap_or(0)
+    };
+    let user_addr = 0x6000_0000_0000u64;
+    if !ring.map_to_user(user_addr, page_table) { return -1; }
+    let mut table = IO_URINGS.lock();
+    let slot = table.iter_mut().position(|r| r.is_none());
+    match slot {
+        Some(idx) => { table[idx] = Some(ring); idx as i64 }
+        None => {
+            let idx = table.len();
+            table.push(Some(ring));
+            idx as i64
+        }
+    }
+}
+
+fn sys_io_uring_enter(fd: u64, to_submit: u64, _min_complete: u64) -> i64 {
+    let mut table = IO_URINGS.lock();
+    let idx = fd as usize;
+    if idx >= table.len() || table[idx].is_none() { return -1; }
+    let mut submitted = 0u32;
+    if to_submit > 0 {
+        if let Some(ref mut ring) = table[idx] {
+            submitted = ring.submit_sqes();
+        }
+    }
+    submitted as i64
+}
+
+fn sys_io_uring_register(fd: u64, _opcode: u64, _arg: u64) -> i64 {
+    let table = IO_URINGS.lock();
+    let idx = fd as usize;
+    if idx >= table.len() || table[idx].is_none() { -1 } else { 0 }
+}
 
 pub fn init() {
     crate::arch::syscall_entry::init();

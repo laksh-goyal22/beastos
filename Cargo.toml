@@ -21,6 +21,7 @@ members = [
     "libs/beast_syscall",
     "libs/beast_crt",
     "userland/test_keyboard",
+    "userland/io_uring_test",
 ]
 
 [workspace.package]

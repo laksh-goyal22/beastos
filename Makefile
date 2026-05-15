@@ -46,12 +46,14 @@ userland:
 	RUSTFLAGS="-C link-arg=-Ttext=0x400000 -C relocation-model=static" $(CARGO_CMD) --release -p libc
 	RUSTFLAGS="-C link-arg=-Ttext=0x400000 -C relocation-model=static" $(CARGO_CMD) --release -p usb_driver
 	RUSTFLAGS="-C link-arg=-Ttext=0x400000 -C relocation-model=static" $(CARGO_CMD) --release -p hello
+	RUSTFLAGS="-C link-arg=-Ttext=0x400000 -C relocation-model=static" $(CARGO_CMD) --release -p io_uring_test
 	RUSTFLAGS="-C link-arg=-Ttext=0x400000 -C relocation-model=static" $(CARGO_CMD) --release -p test_keyboard
 	RUSTFLAGS="-C link-arg=-Ttext=0x400000 -C relocation-model=static" $(CARGO_CMD) --release -p shell
 	RUSTFLAGS="-C link-arg=-Ttext=0x400000 -C relocation-model=static" $(CARGO_CMD) --release -p be
 	$(CARGO_CMD) --release -p bde
 	@cp target/x86_64-unknown-none/release/usb_driver target/initrd/bin/usb_driver.beast
 	@cp target/x86_64-unknown-none/release/hello target/initrd/bin/hello.beast
+	@cp target/x86_64-unknown-none/release/io_uring_test target/initrd/bin/io_uring_test.beast
 	@cp target/x86_64-unknown-none/release/shell target/initrd/bin/shell.beast
 	@cp target/x86_64-unknown-none/release/be target/initrd/bin/be.beast
 	@echo "📦 Creating initrd.tar..."
