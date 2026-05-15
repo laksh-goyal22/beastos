@@ -116,6 +116,7 @@ pub fn run() -> ! {
 }
 
 pub fn tick(regs: &AllRegisters) {
+    crate::pressure::update();
     let mut sched = SCHEDULER.lock();
     if sched.tick() {
         drop(sched);
@@ -155,6 +156,22 @@ pub fn block_current(reason: BlockReason) {
     kprintln!("[BLOCK] Calling check_reschedule");
     check_reschedule();
     kprintln!("[BLOCK] check_reschedule returned (will loop)");
+}
+
+/// Returns ratio of ready+running tasks to max tasks, as u32 in [0, u32::MAX].
+pub fn task_pressure() -> u32 {
+    let sched = SCHEDULER.lock();
+    let mut ready = 0u64;
+    let mut total = 0u64;
+    for task in sched.tasks.iter().flatten() {
+        total += 1;
+        if task.state == TaskState::Ready || task.state == TaskState::Running {
+            ready += 1;
+        }
+    }
+    drop(sched);
+    if total == 0 { return 0; }
+    (ready.saturating_mul(u32::MAX as u64) / total) as u32
 }
 
 pub fn wake_task(task_id: TaskId) {
@@ -393,47 +410,35 @@ pub fn reschedule(regs: &crate::arch::idt::AllRegisters) {
         let is_target_kernel = (cs & 3) == 0;
 
         if is_target_kernel {
-            // Kernel target: use same 5-push IRETQ as user (SS=0x10, RSP from context)
-            // This avoids a pre-existing GPF bug with 3-push IRETQ on kernel→kernel switches
-            let rsp_from_kstack = kernel_stack_top;
+            // Kernel target: 3-push IRETQ (same-CPL, only pops RIP/CS/RFLAGS)
+            let rsp_from_kstack = kernel_stack_top - 8;
             core::arch::asm!(
-                "mov rsp, r8",
-                // Push SS (kernel data segment)
-                "push qword ptr [rdx + 152]",
-                // Push RSP from saved context.rsp
-                "push qword ptr [rdx + 144]",
+                "mov rsp, {rsp_val}",
+                "mov rcx, {ctx}",
                 // Push RFLAGS, CS, RIP for IRETQ
-                "push qword ptr [rdx + 136]",
-                "push qword ptr [rdx + 128]",
-                "push qword ptr [rdx + 120]",
+                "push qword ptr [rcx + 136]",
+                "push qword ptr [rcx + 128]",
+                "push qword ptr [rcx + 120]",
                 // Restore all GP registers from context
-                "mov rax, [rdx + 0]",
-                "mov rbx, [rdx + 8]",
-                "mov rcx, [rdx + 16]",
-                "mov rbp, [rdx + 32]",
-                "mov rsi, [rdx + 40]",
-                "mov rdi, [rdx + 48]",
-                "mov r8,  [rdx + 56]",
-                "mov r9,  [rdx + 64]",
-                "mov r10, [rdx + 72]",
-                "mov r11, [rdx + 80]",
-                "mov r12, [rdx + 88]",
-                "mov r13, [rdx + 96]",
-                "mov r14, [rdx + 104]",
-                "mov r15, [rdx + 112]",
-                "mov rdx, [rdx + 24]",
-                // Reload segment registers (user mode may have dirtied them)
-                "push rax",
-                "mov ax, 0x10",
-                "mov ds, ax",
-                "mov es, ax",
-                "mov ss, ax",
-                "xor ax, ax",
-                "mov fs, ax",
-                "pop rax",
+                "mov rax, [rcx + 0]",
+                "mov rbx, [rcx + 8]",
+                // skip rcx — we're using it as base pointer
+                "mov rbp, [rcx + 32]",
+                "mov rsi, [rcx + 40]",
+                "mov rdi, [rcx + 48]",
+                "mov r8,  [rcx + 56]",
+                "mov r9,  [rcx + 64]",
+                "mov r10, [rcx + 72]",
+                "mov r11, [rcx + 80]",
+                "mov r12, [rcx + 88]",
+                "mov r13, [rcx + 96]",
+                "mov r14, [rcx + 104]",
+                "mov r15, [rcx + 112]",
+                "mov rdx, [rcx + 24]",
+                "mov rcx, [rcx + 16]",
                 "iretq",
-                in("rdx") ctx_ptr,
-                in("r8") rsp_from_kstack,
+                ctx = in(reg) ctx_ptr,
+                rsp_val = in(reg) rsp_from_kstack,
                 options(noreturn)
             );
         } else {

@@ -42,7 +42,7 @@ global_asm!(r#"
     and rax, 0x3
     cmp rax, 0
     je 1f
-    swapgs
+    swapgs              // Came from user mode (CPL=3) — swap to kernel GS base
 1:
     // Call the Rust handler
     // Handler expected signature: fn(stack_frame: &InterruptStackFrame, error_code: u64)

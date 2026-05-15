@@ -36,6 +36,10 @@ pub const SYS_TIME_TRAVEL: u64 = 110;
 pub const SYS_IO_URING_SETUP: u64 = 300;
 pub const SYS_IO_URING_ENTER: u64 = 301;
 pub const SYS_IO_URING_REGISTER: u64 = 302;
+pub const SYS_IO_URING_STATS: u64 = 303;
+pub const SYS_SET_LATENCY_CLASS: u64 = 310;
+pub const SYS_PRESSURE: u64 = 311;
+pub const SYS_SYSTEM_METRICS: u64 = 312;
 
 #[inline(always)]
 pub unsafe fn syscall0(num: u64) -> i64 {
@@ -271,4 +275,20 @@ pub fn io_uring_enter(fd: u64, to_submit: u64, min_complete: u64) -> i64 {
 
 pub fn io_uring_register(fd: u64, opcode: u64, arg: u64) -> i64 {
     unsafe { syscall3(SYS_IO_URING_REGISTER, fd, opcode, arg) }
+}
+
+pub fn io_uring_stats(fd: u64, out_buf: &mut [u64; 5]) -> i64 {
+    unsafe { syscall2(SYS_IO_URING_STATS, fd, out_buf.as_mut_ptr() as u64) }
+}
+
+pub fn set_latency_class(class: u64) -> i64 {
+    unsafe { syscall1(SYS_SET_LATENCY_CLASS, class) }
+}
+
+pub fn pressure() -> u64 {
+    unsafe { syscall0(SYS_PRESSURE) as u64 }
+}
+
+pub fn system_metrics(buf: &mut [u64; 4]) -> i64 {
+    unsafe { syscall2(SYS_SYSTEM_METRICS, buf.as_mut_ptr() as u64, 0) }
 }
