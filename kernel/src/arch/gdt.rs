@@ -255,12 +255,10 @@ pub fn init() {
     kprintln!("  [GDT] Loaded with TSS and Per-CPU data initialized");
 }
 
-/// Load the LDT (called after memory and IDT are initialized).
+/// Load the LDT (disabled — LLDT GPFs in QEMU despite correct descriptor).
 pub fn enable_ldt() {
-    crate::kprintln!("  [GDT] LDT disabled (needs debug)");
+    crate::kprintln!("  [GDT] LDT setup skipped");
 }
-
-
 
 /// Update the kernel stack for the current CPU (used on context switch).
 pub fn set_kernel_stack(stack_top: u64) {

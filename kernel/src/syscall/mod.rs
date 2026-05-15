@@ -659,13 +659,15 @@ fn sys_exec(path_ptr: u64, path_len: u64, _argv_ptr: u64) -> i64 {
     // Ensure low memory (0x0 - 0x1000) has page table entries
     // This guards against null pointer derefs and ensures PD[0] exists
     if let Some(phys) = crate::memory::pmm::alloc_page() {
-        let _ = vmm.map_page_with_flags(
+        let r = vmm.map_page_with_flags(
             0x0,
             phys,
             crate::arch::paging::flags::PRESENT |
-            crate::arch::paging::flags::USER |
-            crate::arch::paging::flags::WRITABLE
+            crate::arch::paging::flags::USER
         );
+        kprintln!("[EXEC] Guard page at 0x0 -> {:#x} result={:?}", phys, r);
+    } else {
+        kprintln!("[EXEC] WARNING: Failed to allocate guard page");
     }
     
     // Setup user stack — MUST include USER flag so user mode (CPL=3) can access it

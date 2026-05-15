@@ -394,6 +394,7 @@ pub fn reschedule(regs: &crate::arch::idt::AllRegisters) {
     let new_cr3 = task.page_table;
     let kernel_stack_top = task.kernel_stack_top;
     let cs = task.context.cs;
+    let ctx_rsp = task.context.rsp;
     
     crate::kprintln!("[RSCHED_SW] -> task={} '{}' kstack_top={:#x} ctx.rsp={:#x} ctx.rip={:#x} ctx.cs={:#x} r12={:#x} r13={:#x}",
         task.id, task.name_str(), kernel_stack_top, task.context.rsp, task.context.rip, task.context.cs,
@@ -410,12 +411,12 @@ pub fn reschedule(regs: &crate::arch::idt::AllRegisters) {
         let is_target_kernel = (cs & 3) == 0;
 
         if is_target_kernel {
-            // Kernel target: 3-push IRETQ (same-CPL, only pops RIP/CS/RFLAGS)
-            let rsp_from_kstack = kernel_stack_top - 8;
+            // Kernel target: 3-push IRETQ — restore RSP from saved context
+            let rsp_from_kstack = ctx_rsp;
             core::arch::asm!(
-                "mov rsp, {rsp_val}",
                 "mov rcx, {ctx}",
-                // Push RFLAGS, CS, RIP for IRETQ
+                "mov rsp, {rsp_val}",
+                // Push RFLAGS, CS, RIP below the saved RSP
                 "push qword ptr [rcx + 136]",
                 "push qword ptr [rcx + 128]",
                 "push qword ptr [rcx + 120]",

@@ -66,7 +66,7 @@ pub extern "C" fn kmain() -> ! {
         0x2000000,
     );
 
-    // LDT disabled (LLDT needs further debugging)
+    // LDT disabled — `lldt` GPFs despite correct descriptor (QEMU quirk)
     // beast_os_kernel::arch::gdt::enable_ldt();
 
     beast_os_kernel::scheduler::init();
