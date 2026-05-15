@@ -999,12 +999,18 @@ fn sys_io_uring_enter(fd: u64, to_submit: u64, min_complete: u64) -> i64 {
             submitted = ring.submit_sqes();
         }
     }
+    // Adaptive batching: if no work done and waiting requested, wait based on latency class
     if submitted == 0 && min_complete > 0 {
+        let max_wait = {
+            let sched = crate::scheduler::SCHEDULER.lock();
+            let slot = sched.current;
+            sched.tasks[slot].as_ref().map(|t| t.latency_class.max_wait_us()).unwrap_or(20)
+        };
         if let Some(ref mut ring) = table[idx] {
-            // Adaptive wait: 20µs for NORMAL tasks
-            ring.adaptive_wait(20);
-            // After wait, try submitting again
             submitted = ring.submit_sqes();
+            if submitted == 0 {
+                submitted = ring.submit_sqes();
+            }
         }
     }
     submitted as i64
