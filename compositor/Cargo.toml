@@ -8,3 +8,4 @@ license.workspace = true
 [dependencies]
 beast_syscall = { path = "../libs/beast_syscall" }
 beast_crt = { path = "../libs/beast_crt" }
+beast_font = { path = "../libs/beast_font" }
